@@ -1,0 +1,44 @@
+[workspace]
+name = "gspull"
+version = "0.1.0"
+description = "GS-Pull environment configuration"
+channels = ["conda-forge", "pytorch"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.10.*"
+pytorch = "1.13.0.*"
+torchvision = "0.14.0.*"
+cudatoolkit = "11.7.*"
+cudatoolkit-dev = "11.7.*"
+cython = "*"
+
+
+[pypi-dependencies]
+ninja = "*"
+numpy = "==1.26.4"
+
+[tasks]
+install = """
+    pip install -r requirements.txt  && \
+    pip install "git+https://github.com/facebookresearch/pytorch3d.git@main"
+"""
+install_splat = """
+    export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6" && \
+    export FORCE_CUDA=1 && \
+    cd gaussian_splatting/submodules/diff-gaussian-rasterization && \
+    pip install . --no-build-isolation && \
+    cd ../simple-knn && \
+    pip install . --no-build-isolation
+"""
+install_neuralpull = """
+    export FORCE_CUDA=1 && \
+    pip install -e ./np_utils/extensions/chamfer_dist --no-build-isolation
+"""
+install_udf = """
+    unset PYTHONPATH && \
+    cd custom_mc && \
+    python setup.py build_ext --inplace
+"""
+
+
