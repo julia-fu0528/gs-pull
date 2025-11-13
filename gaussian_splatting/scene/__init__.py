@@ -22,7 +22,8 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, 
+                 shuffle=True, resolution_scales=[1.0], brics=True, start_frame=0, end_frame=20000, num_frames=20000):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -40,7 +41,9 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
+        if brics:
+            scene_info = sceneLoadTypeCallbacks["brics"](args.source_path, args.white_background, args.eval, start_frame=start_frame, end_frame=end_frame, num_frames=num_frames)
+        elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")

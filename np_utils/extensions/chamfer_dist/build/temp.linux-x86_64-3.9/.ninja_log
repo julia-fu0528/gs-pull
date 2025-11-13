@@ -1,3 +1,7 @@
 # ninja log v7
 4	25337	1762982208817877248	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer_cuda.o	1d45100f912eafe4
 2	81427	1762982208816106436	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer.o	f31ccd4251b3f922
+34	23909	1762997717623074167	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer_cuda.o	1d45100f912eafe4
+31	135217	1762997717620228424	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer.o	1d44d5f7fbb7d6a4
+27	22722	1763003728922578248	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer_cuda.o	1d45100f912eafe4
+23	51497	1763003728919514815	/oscar/data/ssrinath/users/wfu16/GS-Pull/np_utils/extensions/chamfer_dist/build/temp.linux-x86_64-3.9/chamfer.o	70662f470123add0

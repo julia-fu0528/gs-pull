@@ -12,17 +12,21 @@ import trimesh
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import zarr
+from PIL import Image
+import numpy as np
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from
+             , brics=True, start_frame=0, end_frame=20000, num_frames=20000):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, brics=brics, start_frame=start_frame, end_frame=end_frame, num_frames=num_frames)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -77,7 +81,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
+        mask = zarr.open(viewpoint_cam.mask_path, mode="r")
+        mask = mask[viewpoint_cam.time_idx, :, :]
+        mask = torch.from_numpy(mask).float() 
+        mask = mask.unsqueeze(0)  # (1, 4, H, W)
+        gt_image = Image.open(viewpoint_cam.image_path).convert("RGB")
+        gt_image = gt_image.resize((viewpoint_cam.image_width, viewpoint_cam.image_height))
+        gt_image = torch.from_numpy(np.array(gt_image)).float() / 255.0  # Convert to tensor [0,1]
+        gt_image = gt_image.permute(2, 0, 1).unsqueeze(0)  # (D1, 4, H, W)
+        gt_image[0, :3, :, :] = gt_image[0, :3, :, :] * mask
+        # convert to rgb
+        gt_image = gt_image[:, :3, :, :]
+        gt_image = gt_image.cuda()
+        gt_image = gt_image * mask
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
@@ -175,7 +191,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    
+                    mask = zarr.open(viewpoint.mask_path, mode="r")
+                    mask = mask[viewpoint.time_idx, :, :]
+                    mask = torch.from_numpy(mask).float() 
+                    mask = mask.unsqueeze(0)  # (1, 4, H, W)
+                    gt_image = Image.open(viewpoint.image_path).convert("RGB")
+                    # gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    gt_image = gt_image.resize((viewpoint.image_width, viewpoint.image_height))
+                    gt_image = torch.from_numpy(np.array(gt_image)).float() / 255.0  # Convert to tensor [0,1]
+                    gt_image = gt_image.permute(2, 0, 1).unsqueeze(0)  # (D1, 4, H, W)
+                    gt_image[0, :3, :, :] = gt_image[0, :3, :, :] * mask
+                    # convert to rgb
+                    gt_image = gt_image[:, :3, :, :]
+                    gt_image = gt_image.cuda()
+                    gt_image = gt_image * mask
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
@@ -209,6 +239,9 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--start_frame", type=int, default=0)
+    parser.add_argument("--end_frame", type=int, default=20000)
+    parser.add_argument("--num_frames", type=int, default=20000)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -221,7 +254,8 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, 
+             start_frame=args.start_frame, end_frame=args.end_frame, num_frames=args.num_frames)
 
     # All done
     print("\nTraining complete.")

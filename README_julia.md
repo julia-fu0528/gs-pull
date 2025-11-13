@@ -10,3 +10,6 @@ pixi run install_neuralpull
 pixi run install_udf
 
 ```
+
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH

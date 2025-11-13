@@ -1,0 +1,4 @@
+# ninja log v7
+2	16865	1763044627439211489	/oscar/data/ssrinath/users/wfu16/GS-Pull/gaussian_splatting/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/ext.o	67866e9caa45ad0
+5	26369	1763044627441814422	/oscar/data/ssrinath/users/wfu16/GS-Pull/gaussian_splatting/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/simple_knn.o	41bb6f12c543b28b
+6	104233	1763044627443124187	/oscar/data/ssrinath/users/wfu16/GS-Pull/gaussian_splatting/submodules/simple-knn/build/temp.linux-x86_64-cpython-310/spatial.o	116050de3e111a52
