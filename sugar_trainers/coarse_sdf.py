@@ -216,7 +216,7 @@ def coarse_training_with_sdf_regularization(args):
         source_path=source_path,
         output_path=gs_checkpoint_path,
         iteration_to_load=iteration_to_load,
-        load_gt_images=True,
+        load_gt_images=False,  # Set to False to avoid OOM - images loaded on-demand from image_path
         eval_split=use_eval_split,
         eval_split_interval=n_skip_images_for_eval_split,
         dataset_name=args.dataset_name,
@@ -543,7 +543,7 @@ def coarse_training_with_sdf_regularization(args):
                 pred_rgb = pred_rgb.transpose(-1, -2).transpose(-2, -3)
 
                 # Gather rgb ground truth
-                gt_image = nerfmodel.get_gt_image(camera_indices=camera_indices)
+                gt_image = nerfmodel.get_gt_image(camera_indices=camera_indices, to_cuda=True)
                 gt_rgb = gt_image.view(-1, sugar.image_height, sugar.image_width, 3)
                 gt_rgb = gt_rgb.transpose(-1, -2).transpose(-2, -3)
 

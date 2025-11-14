@@ -11,6 +11,7 @@
 
 import os
 import sys
+import random
 from PIL import Image
 from scene.cameras import Camera
 
@@ -653,11 +654,26 @@ def readMultipleViewinfos(datadir,llffhold=8):
                            ply_path=ply_path)
     return scene_info
 
-def readBRICSCameras(params, images_folder, white_background, start_idx, end_idx, num_frames):
+def readBRICSCameras(params, images_folder, white_background, frame_idx, num_frames, camera_indices=None):
+    """
+    Load cameras for a single frame.
+    
+    Args:
+        params: List of camera parameters
+        images_folder: Path to images folder
+        white_background: Whether to use white background
+        frame_idx: Single frame index to load (e.g., start_frame)
+        num_frames: Total number of frames (for time normalization)
+        camera_indices: Optional list of camera indices to load. If None, loads all cameras.
+    """
     cam_infos = []
-    uid_count = 0
-    for idx, param in enumerate(params):
-        print(f"reading camera {idx} of {len(params)}")
+    
+    # If camera_indices is provided, only load those cameras
+    cameras_to_load = range(len(params)) if camera_indices is None else camera_indices
+    
+    for idx in cameras_to_load:
+        param = params[idx]
+        print(f"reading camera {idx} of {len(params)}: {param['cam_name']}")
         mask_path = os.path.join(images_folder, param["cam_name"], 'mask.zarr')
         if not os.path.exists(os.path.join(images_folder, param["cam_name"])):
             print(f"camera {param['cam_name']} not found")
@@ -697,22 +713,24 @@ def readBRICSCameras(params, images_folder, white_background, start_idx, end_idx
         intr[1, 2] = cy
         dist = np.asarray([param["k1"], param["k2"], param["p1"], param["p2"]])
         
-        for img_idx in range(start_idx, end_idx):
-            image_path = os.path.join(images_folder, param["cam_name"], 'undistorted',str(img_idx).zfill(6) + '.png')
-            if os.path.exists(image_path):
-                image_name = os.path.basename(image_path).split(".")[0]
-                image = None
-                    
-                num = np.float64(img_idx)
-                den = np.float64(num_frames)
-                time = float(num / den)
-                uid = uid_count
-                uid_count += 1
-                cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, 
-                                    image_name=image_name, width=int(width), height=int(height), 
-                                    time = time, mask_path = mask_path, time_idx = img_idx,
-                                    white_background=white_background, view_idx=idx)
-                cam_infos.append(cam_info)
+        # Load only the specified frame
+        image_path = os.path.join(images_folder, param["cam_name"], 'undistorted', str(frame_idx).zfill(6) + '.png')
+        if os.path.exists(image_path):
+            image_name = os.path.basename(image_path).split(".")[0]
+            image = None
+                
+            num = np.float64(frame_idx)
+            den = np.float64(num_frames)
+            time = float(num / den)
+            # uid = uid_count
+            # uid_count += 1
+            cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path, 
+                                image_name=image_name, width=int(width), height=int(height), 
+                                time = time, mask_path = mask_path, time_idx = frame_idx,
+                                white_background=white_background, view_idx=idx)
+            cam_infos.append(cam_info)
+        else:
+            print(f"Warning: Image not found for camera {param['cam_name']} at frame {frame_idx}: {image_path}")
 
     return cam_infos
 
@@ -722,25 +740,29 @@ def readBricsSceneInfo(path, white_background, eval, extension=".png", start_fra
     params = read_params(os.path.join(images_folder, '..', filename))
     
     print(f"filename: {filename}")
-    cam0 = params[0]["cam_name"]
-    cam0_dir = os.path.join(images_folder, cam0)
-    # n_frames = len([frame for frame in os.listdir(os.path.join(cam0_dir, "undistorted")) if frame.endswith(".png")])
-    interval = end_frame - start_frame
-    print("Reading Training Transforms")
-    # train_cam_infos = readCamerasFromTransforms(
-        # path, "transforms_train.json", white_background, extension)
-    train_end = int(interval * 0.8) + start_frame
-    print(f"interval: {interval}")
-    print(f"start_frame: {start_frame}")
-    print(f"end_frame: {end_frame}")
-    print(f"train_end: {train_end}")
-    print(f"num_frames: {num_frames}")
-    train_cam_infos = readBRICSCameras(params, images_folder, white_background, start_frame, train_end, num_frames)
-    print("Reading Test Transforms")
-    # test_cam_infos = readCamerasFromTransforms(
-    #     path, "transforms_test.json", white_background, extension)
-    test_cam_infos = readBRICSCameras(params, images_folder, white_background, train_end, end_frame, num_frames)
-    # test_cam_infos = readBRICSCamerasTest(params, images_folder, white_background, frame_id=230)
+    print(f"Total cameras: {len(params)}")
+    print(f"Loading only frame {start_frame} (single timestep)")
+    
+    # Split cameras for train/test (80% train, 20% test)
+    num_cameras = len(params)
+    train_split_idx = int(num_cameras * 0.8)
+    
+    # Shuffle camera indices for random split
+    camera_indices = list(range(num_cameras))
+    random.seed(42)  # For reproducibility
+    random.shuffle(camera_indices)
+    
+    train_camera_indices = camera_indices[:train_split_idx]
+    test_camera_indices = camera_indices[train_split_idx:]
+    
+    print(f"Train cameras: {len(train_camera_indices)} ({train_camera_indices[:5]}...)" if len(train_camera_indices) > 5 else f"Train cameras: {len(train_camera_indices)} ({train_camera_indices})")
+    print(f"Test cameras: {len(test_camera_indices)} ({test_camera_indices[:5]}...)" if len(test_camera_indices) > 5 else f"Test cameras: {len(test_camera_indices)} ({test_camera_indices})")
+    
+    print("Reading Training Cameras (single frame)")
+    train_cam_infos = readBRICSCameras(params, images_folder, white_background, start_frame, num_frames, camera_indices=train_camera_indices)
+    print("Reading Test Cameras (single frame)")
+    test_cam_infos = readBRICSCameras(params, images_folder, white_background, start_frame, num_frames, camera_indices=test_camera_indices)
+    
     if not eval:
         train_cam_infos.extend(test_cam_infos)
         test_cam_infos = []

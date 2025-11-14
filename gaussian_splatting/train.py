@@ -15,14 +15,130 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import zarr
 from PIL import Image
 import numpy as np
+import wandb
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
 
+def detect_and_filter_clusters(xyz, opacity, eps=2.0, min_samples=100):
+    """
+    Detect spatial clusters and filter out outlier clusters.
+    
+    Args:
+        xyz: [N, 3] tensor of gaussian positions
+        opacity: [N] tensor of gaussian opacities
+        distance_threshold: Maximum distance between clusters
+        min_cluster_size: Minimum size for a cluster to be considered valid
+    
+    Returns:
+        cluster_mask: Boolean mask of gaussians to keep
+    """
+    from sklearn.cluster import DBSCAN
+    import numpy as np
+    
+    # Convert to numpy for clustering
+    xyz_np = xyz.detach().cpu().numpy()
+    opacity_np = opacity.detach().cpu().numpy()
+    
+    # Use DBSCAN to detect clusters
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(xyz_np)
+    cluster_labels = clustering.labels_
+    
+    # Find the largest cluster (main cluster) - use older NumPy syntax
+    print(f"cluster_labels: {cluster_labels}")
+    print(f"cluster labels: {len(cluster_labels)}")
+    unique_labels = np.unique(cluster_labels)
+    print(f"unique_labels: {unique_labels}")
+    counts = np.array([(cluster_labels == label).sum() for label in unique_labels])
+    
+    # Find the largest cluster (excluding noise labeled as -1)
+    valid_mask = unique_labels != -1
+    valid_labels = unique_labels[valid_mask]
+    valid_counts = counts[valid_mask]
+    
+    if len(valid_labels) == 0:
+        print("Warning: No valid clusters found, keeping all points")
+        cluster_mask = np.ones(len(cluster_labels), dtype=bool)
+    else:
+        largest_cluster_label = valid_labels[np.argmax(valid_counts)]
+        # main_cluster_label = unique_labels[np.argmax(counts)]
+    
+        print(f"Detected {len(valid_labels)} clusters with sizes: {valid_counts}")
+        print(f"Largest cluster: label {largest_cluster_label} with {valid_counts.max()} points")
+    
+        # # Calculate cluster statistics
+        # cluster_stats = {}
+        # for label in unique_labels:
+        #     if label == -1:  # Noise points
+        #         continue
+        #     mask = cluster_labels == label
+        #     cluster_stats[label] = {
+        #         'size': mask.sum(),
+        #         'mean_opacity': opacity_np[mask].mean(),
+        #         'center': xyz_np[mask].mean(axis=0),
+        #         'is_main': (label == main_cluster_label)
+        #     }
+        # Calculate statistics for the largest cluster
+        main_mask = cluster_labels == largest_cluster_label
+        main_center = xyz_np[main_mask].mean(axis=0)
+        main_opacity = opacity_np[main_mask].mean()
+        
+        # Find clusters that are too far from main cluster
+        # main_center = cluster_stats[main_cluster_label]['center']
+        # clusters_to_keep = [main_cluster_label]  # Always keep main cluster
+        
+        print(f"Largest cluster stats:")
+        print(f"  - Center: {main_center}")
+        print(f"  - Mean opacity: {main_opacity:.3f}")
+        
+        # Calculate distance from each point in cluster to center
+        distances = np.linalg.norm(xyz_np[main_mask] - main_center, axis=1)
+        distance_threshold = np.percentile(distances, 95)  # Keep 95% closest points
+        
+        # Filter outliers within the cluster
+        outlier_mask = distances <= distance_threshold
+        filtered_indices = np.where(main_mask)[0][outlier_mask]
+        
+        # Create final mask
+        cluster_mask = np.zeros(len(cluster_labels), dtype=bool)
+        cluster_mask[filtered_indices] = True
+    
+        # for label, stats in cluster_stats.items():
+        #     if label == main_cluster_label:
+        #         continue
+                
+        #     # Calculate distance to main cluster
+        #     distance_to_main = np.linalg.norm(stats['center'] - main_center)
+            
+        #     # Keep cluster if it's close enough OR has high average opacity
+        #     if distance_to_main <= eps * 2:  # Within 2x threshold
+        #         clusters_to_keep.append(label)
+        #         print(f"Keeping cluster {label} (distance: {distance_to_main:.3f}, opacity: {stats['mean_opacity']:.3f})")
+        #     else:
+        #         print(f"Filtering out cluster {label} (distance: {distance_to_main:.3f}, opacity: {stats['mean_opacity']:.3f})")
+        
+        # # Create final mask
+        # cluster_mask = np.isin(cluster_labels, clusters_to_keep)
+        print(f"Cluster filtering: keeping {cluster_mask.sum()}/{len(cluster_mask)} gaussians (largest cluster only)")
+        # print(f"Cluster filtering: keeping {cluster_mask.sum()}/{len(cluster_mask)} gaussians")
+    return torch.tensor(cluster_mask, device=xyz.device)
+
+
+
+
+def to_wandb_img(t: torch.Tensor):
+    """
+    t: [C,H,W] or [1,3,H,W] float in [0,1] on CUDA
+    returns a wandb.Image
+    """
+    if t.dim() == 4: t = t[0]
+    t = t.detach().clamp(0,1).permute(1,2,0).cpu().numpy()  # HWC
+    return wandb.Image(t)
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from
-             , brics=True, start_frame=0, end_frame=20000, num_frames=20000):
+             , wandb_run=None, brics=True, start_frame=0, end_frame=20000, num_frames=20000):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -93,7 +209,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # convert to rgb
         gt_image = gt_image[:, :3, :, :]
         gt_image = gt_image.cuda()
-        gt_image = gt_image * mask
+        
+        
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
@@ -111,6 +228,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             scaling = gaussians.get_scaling
             print(scaling.min(1)[0].mean().item(), scaling.median(1)[0].mean().item(), scaling.max(1)[0].mean().item())
         loss.backward()
+        if iteration % 10 == 0 and wandb_run is not None:
+            wandb_run.log({
+                "train/l1": Ll1.item(),
+                "train/loss": loss.item(),
+                "train/ema_loss": ema_loss_for_log,
+                "train/iter_time_ms": iter_start.elapsed_time(iter_end),
+                "train/num_points": gaussians.get_xyz.shape[0],
+            }, step=iteration)
 
         iter_end.record()
 
@@ -124,10 +249,99 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, wandb_run, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+                
+                # Collect unique time values from cameras (for static model, this will typically be just one value)
+                train_cams = scene.getTrainCameras()
+                test_cams = scene.getTestCameras()
+                unique_times = set()
+                
+                # Collect timestamps from ALL training cameras
+                for viewpoint_cam in train_cams:
+                    cams = viewpoint_cam if isinstance(viewpoint_cam, list) else [viewpoint_cam]
+                    for cam in cams:
+                        time_value = getattr(cam, 'time', None)
+                        if torch.is_tensor(time_value):
+                            time_value = time_value.item()
+                        if time_value is not None:
+                            unique_times.add(float(time_value))
+                
+                # Also collect timestamps from test cameras
+                for test_cam in test_cams:
+                    cams = test_cam if isinstance(test_cam, list) else [test_cam]
+                    for cam in cams:
+                        time_value = getattr(cam, 'time', None)
+                        if torch.is_tensor(time_value):
+                            time_value = time_value.item()
+                        if time_value is not None:
+                            unique_times.add(float(time_value))
+                
+                unique_times = sorted(list(unique_times))
+                print(f"Found {len(unique_times)} unique time values: {unique_times}")
+                
+                # Compute global mask using brightness filter
+                xyz = gaussians.get_xyz
+                # Filter by brightness
+                rgb_dc = torch.sigmoid(gaussians._features_dc)
+                if rgb_dc.dim() == 3:  # e.g., [N,1,3]
+                    rgb_dc = rgb_dc.squeeze(1)
+                brightness = 0.2126*rgb_dc[:,0] + 0.7152*rgb_dc[:,1] + 0.0722*rgb_dc[:,2]
+                bright_th = 0.2
+                non_black_mask = brightness > bright_th
+                
+                # For static model, we can optionally apply clustering filter here
+                # Uncomment if you want to use clustering:
+                distance_threshold = 0.2
+                if non_black_mask.sum() > 0:
+                    cluster_mask = detect_and_filter_clusters(
+                        xyz[non_black_mask],
+                        gaussians.get_opacity[non_black_mask],
+                        eps=distance_threshold,
+                        min_samples=20
+                    )
+                    global_mask = torch.zeros(len(xyz), dtype=torch.bool, device=xyz.device)
+                    global_mask[non_black_mask] = cluster_mask
+                else:
+                    global_mask = torch.zeros(len(xyz), dtype=torch.bool, device=xyz.device)
+                
+                print(f"Global mask: {global_mask.sum().item()}/{len(global_mask)} gaussians kept after filtering")
+                
+                # For static model, we don't compute deformations, but we can save the mask
+                # If you have a deformation network, uncomment below:
+                # deformed_params = {}
+                # with torch.no_grad():
+                #     N_all = gaussians.get_xyz.shape[0]
+                #     for time_value in unique_times:
+                #         time_tensor = torch.full((N_all, 1), time_value, device=gaussians.get_xyz.device)
+                #         means3D, scales, rotations, opacity, _ = gaussians._deformation.forward(
+                #             gaussians.get_xyz,
+                #             gaussians._scaling,
+                #             gaussians._rotation,
+                #             gaussians._opacity,
+                #             None,
+                #             time_tensor
+                #         )
+                #         d_xyz = means3D - gaussians.get_xyz
+                #         d_rotation = rotations - gaussians._rotation
+                #         d_scaling = scales - gaussians._scaling
+                #         deformed_params[time_value] = (d_xyz, d_rotation, d_scaling)
+                
+                # Save with optional parameters (scene.save needs to be updated to accept these)
+                scene.save(iteration, global_mask=global_mask)
+                # If scene.save supports it: scene.save(iteration, deformed_params=deformed_params, global_mask=global_mask)
+                
+                snap_dir = os.path.join(args.model_path, "point_cloud/iteration_{}".format(iteration))
+                if wandb_run is not None:
+                    art = wandb.Artifact(f"gaussians-{iteration:06d}", type="point_cloud")
+                    p = os.path.join(snap_dir, "point_cloud.ply")
+                    if os.path.isfile(p):
+                        print(f"Adding file: {p}")
+                        art.add_file(p)
+                    else:
+                        print(f"File not found: {p}")
+                    wandb_run.log_artifact(art)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -173,7 +387,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, wandb_run, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -193,7 +407,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     
                     mask = zarr.open(viewpoint.mask_path, mode="r")
-                    mask = mask[viewpoint.time_idx, :, :]
+                    mask_frame_idx = getattr(viewpoint, 'mask_frame_idx', None) or getattr(viewpoint, 'time_idx', None)
+                    mask = mask[mask_frame_idx, :, :]
                     mask = torch.from_numpy(mask).float() 
                     mask = mask.unsqueeze(0)  # (1, 4, H, W)
                     gt_image = Image.open(viewpoint.image_path).convert("RGB")
@@ -205,7 +420,12 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     # convert to rgb
                     gt_image = gt_image[:, :3, :, :]
                     gt_image = gt_image.cuda()
-                    gt_image = gt_image * mask
+                    if idx < 5 and wandb_run is not None:   # don't spam
+                        wandb_run.log({
+                            f"{config['name']}/render_{idx}": to_wandb_img(image),
+                            f"{config['name']}/gt_{idx}":     to_wandb_img(gt_image),
+                        }, step=iteration)
+                        
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
@@ -247,7 +467,15 @@ if __name__ == "__main__":
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
-
+    run = wandb.init(
+        project="gs-pull",
+        # entity="wanjia_fu",
+        name=args.source_path.split("/")[-2] or "run",
+        # dir=args.model_path,                # put run files next to your outputs
+        # config=vars(args),                  # log all CLI args
+        # tags=["3DGS", "deform", "train"],
+    )
+    print(f"W&B URL:{run.url}")
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
@@ -255,7 +483,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, 
-             start_frame=args.start_frame, end_frame=args.end_frame, num_frames=args.num_frames)
+             wandb_run=run, start_frame=args.start_frame, end_frame=args.end_frame, num_frames=args.num_frames)
 
     # All done
     print("\nTraining complete.")

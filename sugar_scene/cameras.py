@@ -26,7 +26,9 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
     Returns:
         List of GSCameras: List of Gaussian Splatting cameras.
     """
-    if dataset_name == "blender":
+    if dataset_name == "brics":
+        image_dir = source_path
+    elif dataset_name == "blender":
         image_dir = os.path.join(source_path, 'train')
     elif dataset_name == "relight3d":
         image_dir = os.path.join(source_path, 'inputs/images')
@@ -74,12 +76,56 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
         # GT data
         id = camera_transform['id']
         name = camera_transform['img_name']
-        if dataset_name == "blender":
-            if cam_idx >= 100:
-                image_dir = os.path.join(source_path, 'test')
+        
+        # Get image_path, mask_path, and time_idx from cameras.json if available
+        image_path = camera_transform.get('image_path', None)
+        mask_path = camera_transform.get('mask_path', None)
+        time_idx = camera_transform.get('time_idx', None)
+        
+        # If image_path not in JSON, construct it based on dataset type
+        if not image_path:
+            if dataset_name == "blender":
+                if cam_idx >= 100:
+                    image_dir = os.path.join(source_path, 'test')
+                else:
+                    image_dir = os.path.join(source_path, 'train')
+                image_path = os.path.join(image_dir, name + extension)
+            elif dataset_name == "brics":
+                # For BRICS, try to reconstruct path from image_path if available, otherwise use img_name
+                # This is a fallback - ideally image_path should be in cameras.json
+                image_path = None  # Will be set below if needed
             else:
-                image_dir = os.path.join(source_path, 'train')
-        image_path = os.path.join(image_dir,  name + extension)
+                image_path = os.path.join(image_dir, name + extension)
+        
+        # For BRICS, handle image_path
+        if dataset_name == "brics":
+            if image_path:
+                # If image_path is relative, make it absolute
+                if not os.path.isabs(image_path):
+                    image_path = os.path.join(source_path, image_path)
+            else:
+                # Fallback: reconstruct BRICS path structure
+                # Try to find which camera directory contains this image
+                img_name = name
+                found = False
+                for item in os.listdir(source_path):
+                    cam_dir = os.path.join(source_path, item)
+                    if os.path.isdir(cam_dir):
+                        undistorted_dir = os.path.join(cam_dir, 'undistorted')
+                        if os.path.exists(undistorted_dir):
+                            potential_path = os.path.join(undistorted_dir, img_name + extension)
+                            if os.path.exists(potential_path):
+                                image_path = potential_path
+                                found = True
+                                break
+                if not found:
+                    # Last resort: try first camera directory
+                    cam_dirs = [d for d in os.listdir(source_path) if os.path.isdir(os.path.join(source_path, d)) and os.path.exists(os.path.join(source_path, d, 'undistorted'))]
+                    if cam_dirs:
+                        cam_dir = cam_dirs[0]
+                        image_path = os.path.join(source_path, cam_dir, 'undistorted', img_name + extension)
+                    else:
+                        image_path = os.path.join(source_path, img_name + extension)
         
         if load_gt_images:
             image = Image.open(image_path)
@@ -110,7 +156,7 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
             colmap_id=id, image=gt_image, gt_alpha_mask=None,
             R=R, T=T, FoVx=fov_x, FoVy=fov_y,
             image_name=name, uid=id,
-            image_height=image_height, image_width=image_width,)
+            image_height=image_height, image_width=image_width,image_path=image_path, mask_path=mask_path, time_idx=time_idx)
         
         cam_list.append(gs_camera)
 
@@ -124,6 +170,7 @@ class GSCamera(torch.nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  image_height=None, image_width=None,
+                 image_path=None, mask_path=None, time_idx=None,
                  ):
         """
         Args:
@@ -154,7 +201,9 @@ class GSCamera(torch.nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-
+        self.image_path = image_path
+        self.mask_path = mask_path
+        self.time_idx = time_idx
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:
@@ -169,14 +218,14 @@ class GSCamera(torch.nn.Module):
                 self.image_height = image_height
                 self.image_width = image_width
         else:        
-            self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
-            self.image_width = self.original_image.shape[2]
-            self.image_height = self.original_image.shape[1]
+            # self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+            self.image_width = image_width
+            self.image_height = image_height
 
-            if gt_alpha_mask is not None:
-                self.original_image *= gt_alpha_mask.to(self.data_device)
-            else:
-                self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            # if gt_alpha_mask is not None:
+            #     self.original_image *= gt_alpha_mask.to(self.data_device)
+            # else:
+            #     self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01

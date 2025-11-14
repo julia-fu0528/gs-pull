@@ -18,7 +18,7 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, image_path, gt_alpha_mask, gt_alpha_mask_path,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 image_width=None, image_height=None
+                 image_width=None, image_height=None, time_idx=None
                  ):
         super(Camera, self).__init__()
 
@@ -30,8 +30,8 @@ class Camera(nn.Module):
         self.FoVy = FoVy
         self.image_name = image_name
         self.image_path = image_path
-        self.gt_alpha_mask_path = gt_alpha_mask_path
-
+        self.mask_path = gt_alpha_mask_path
+        self.time_idx = time_idx    
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:

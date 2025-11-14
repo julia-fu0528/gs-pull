@@ -14,21 +14,28 @@ cython = "*"
 zarr = "*"
 
 [pypi-dependencies]
-ninja = "*"
 torch = "==1.13.0"
 torchvision = "==0.14.0"
 pip = "*"
 plyfile = "*"
 tqdm = "*"
 trimesh = "*"
+wandb = "*"
+opencv-python = "*"
+open3d = "*"
+ninja = "*"
+cmake = "*"
+setuptools = "*"
+wheel = "*"
+rich = "*"
+scikit-learn = "*"
 
 [activation]
 env = { PYTHONNOUSERSITE = "1" }
 
 [tasks]
 install = """
-    python -m pip install -r requirements.txt && \
-    python -m pip install pytorch3d
+    python -m pip install -r requirements.txt
 """
 
 install_splat = """

@@ -117,7 +117,8 @@ class SuGaRCompositor(nn.Module):
             sh_degree=sh_deg,
             campos=camera_center,
             prefiltered=False,
-            debug=False
+            debug=False,
+            antialiasing=False
         )
     
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)

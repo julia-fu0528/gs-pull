@@ -39,13 +39,14 @@ def loadCam(args, id, cam_info, resolution_scale):
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
     mask_path = cam_info.mask_path    
+    time_idx = cam_info.time_idx
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=None, image_path = cam_info.image_path, 
                   gt_alpha_mask=None, gt_alpha_mask_path=mask_path,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  image_width=resolution[0], image_height=resolution[1])
+                  image_width=resolution[0], image_height=resolution[1], time_idx=time_idx)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
@@ -68,6 +69,9 @@ def camera_to_JSON(id, camera : Camera):
     camera_entry = {
         'id' : id,
         'img_name' : camera.image_name,
+        'img_path' : camera.image_path,
+        'mask_path' : camera.mask_path,
+        'time_idx' : camera.time_idx,
         'width' : camera.width,
         'height' : camera.height,
         'position': pos.tolist(),
@@ -75,4 +79,13 @@ def camera_to_JSON(id, camera : Camera):
         'fy' : fov2focal(camera.FovY, camera.height),
         'fx' : fov2focal(camera.FovX, camera.width)
     }
+    # Save image_path if available (needed for BRICS and other datasets with custom paths)
+    if hasattr(camera, 'image_path') and camera.image_path:
+        # Store relative path to source_path for portability
+        camera_entry['image_path'] = camera.image_path
+    # Save mask_path and time_idx if available (for BRICS datasets)
+    if hasattr(camera, 'mask_path') and camera.mask_path:
+        camera_entry['mask_path'] = camera.mask_path
+    if hasattr(camera, 'time_idx') and camera.time_idx is not None:
+        camera_entry['time_idx'] = camera.time_idx
     return camera_entry

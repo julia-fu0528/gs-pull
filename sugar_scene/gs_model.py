@@ -2,6 +2,9 @@ import sys
 sys.path.append('./gaussian_splatting')
 import os
 import torch
+import zarr
+from PIL import Image
+import numpy as np
 import plotly.graph_objs as go
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.gaussian_renderer import render as gs_render
@@ -207,10 +210,45 @@ class GaussianSplattingWrapper:
         Returns:
             Tensor: The ground truth image.
         """
-        gt_image = self.cam_list[camera_indices].original_image
+        camera = self.cam_list[camera_indices]
+        
+        # Load mask from zarr (for BRICS datasets) or image file
+        if camera.mask_path and camera.mask_path.endswith('.zarr'):
+            # Zarr mask format (BRICS)
+            mask = zarr.open(camera.mask_path, mode="r")
+            if camera.time_idx is not None:
+                mask = mask[camera.time_idx, :, :]
+            else:
+                mask = mask[0, :, :]  # Default to first frame if time_idx not available
+            mask = torch.from_numpy(mask).float()
+            mask = mask.unsqueeze(0)  # (1, H, W)
+        elif camera.mask_path:
+            # Image file mask format
+            from PIL import Image
+            mask = Image.open(camera.mask_path)
+            mask = mask.resize((camera.image_width, camera.image_height))
+            mask = torch.from_numpy(np.array(mask)).float()  # (H, W)
+            mask = mask.unsqueeze(0)  # (1, H, W)
+        else:
+            # No mask, use all ones
+            mask = torch.ones((1, camera.image_height, camera.image_width), dtype=torch.float32)
+        
+        # Load GT image
+        from PIL import Image
+        gt_image = Image.open(camera.image_path).convert("RGB")
+        gt_image = gt_image.resize((camera.image_width, camera.image_height))
+        gt_image = torch.from_numpy(np.array(gt_image)).float() / 255.0  # Convert to tensor [0,1]
+        gt_image = gt_image.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+        
+        # Move to CUDA before applying mask to ensure same device
         if to_cuda:
+            mask = mask.cuda()
             gt_image = gt_image.cuda()
-        return gt_image.permute(1, 2, 0)
+        
+        # Apply mask (both tensors should be on same device now)
+        gt_image[0, :3, :, :] = gt_image[0, :3, :, :] * mask
+        
+        return gt_image.squeeze(0).permute(1, 2, 0)
     
     def get_test_gt_image(self, camera_indices:int, to_cuda=False):
         """Returns the ground truth image corresponding to the test camera at the given index.
@@ -222,10 +260,43 @@ class GaussianSplattingWrapper:
         Returns:
             Tensor: The ground truth image.
         """
-        gt_image = self.test_cam_list[camera_indices].original_image
+        camera = self.test_cam_list[camera_indices]
+        
+        # Load mask from zarr (for BRICS datasets) or image file
+        if camera.mask_path and camera.mask_path.endswith('.zarr'):
+            # Zarr mask format (BRICS)
+            mask = zarr.open(camera.mask_path, mode="r")
+            if camera.time_idx is not None:
+                mask = mask[camera.time_idx, :, :]
+            else:
+                mask = mask[0, :, :]  # Default to first frame if time_idx not available
+            mask = torch.from_numpy(mask).float()
+            mask = mask.unsqueeze(0)  # (1, H, W)
+        elif camera.mask_path:
+            # Image file mask format
+            mask = Image.open(camera.mask_path)
+            mask = mask.resize((camera.image_width, camera.image_height))
+            mask = torch.from_numpy(np.array(mask)).float()  # (H, W)
+            mask = mask.unsqueeze(0)  # (1, H, W)
+        else:
+            # No mask, use all ones
+            mask = torch.ones((1, camera.image_height, camera.image_width), dtype=torch.float32)
+        
+        # Load GT image
+        gt_image = Image.open(camera.image_path).convert("RGB")
+        gt_image = gt_image.resize((camera.image_width, camera.image_height))
+        gt_image = torch.from_numpy(np.array(gt_image)).float() / 255.0  # Convert to tensor [0,1]
+        gt_image = gt_image.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+        
+        # Move to CUDA before applying mask to ensure same device
         if to_cuda:
+            mask = mask.cuda()
             gt_image = gt_image.cuda()
-        return gt_image.permute(1, 2, 0)
+        
+        # Apply mask (both tensors should be on same device now)
+        gt_image[0, :3, :, :] = gt_image[0, :3, :, :] * mask
+        
+        return gt_image.squeeze(0).permute(1, 2, 0)
     
     def downscale_output_resolution(self, downscale_factor):
         """Downscale the output resolution of the Gaussian Splatting model.

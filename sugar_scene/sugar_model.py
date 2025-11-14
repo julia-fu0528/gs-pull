@@ -2057,7 +2057,8 @@ class SuGaR(nn.Module):
             sh_degree=sh_deg,
             campos=camera_center,
             prefiltered=False,
-            debug=False
+            debug=False,
+            antialiasing=False
         )
     
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -2146,7 +2147,7 @@ class SuGaR(nn.Module):
                 print("scales", scales.shape)
             print("screenspace_points", screenspace_points.shape)
 
-        rendered_image, radii = rasterizer(
+        rasterizer_output = rasterizer(
             means3D = positions,
             means2D = means2D,
             shs = shs,
@@ -2155,6 +2156,13 @@ class SuGaR(nn.Module):
             scales = scales,
             rotations = quaternions,
             cov3D_precomp = cov3D)
+        
+        # Handle different versions of the rasterizer (some return 2 values, some return 3)
+        try:
+            rendered_image, radii, invdepths = rasterizer_output
+        except ValueError:
+            # Older version returns only 2 values
+            rendered_image, radii = rasterizer_output
         
         if not(return_2d_radii or return_opacities or return_colors):
             return rendered_image.transpose(0, 1).transpose(1, 2)
@@ -2415,6 +2423,7 @@ class SuGaR(nn.Module):
             sh_degree=3,
             campos=camera_center,
             prefiltered=False,
+            antialiasing=False,
             debug=False
         )
 
@@ -2442,7 +2451,7 @@ class SuGaR(nn.Module):
 
         means2D = screenspace_points
 
-        rendered_image, radii = rasterizer(
+        rasterizer_output = rasterizer(
             means3D=positions,
             means2D=means2D,
             shs=shs,
@@ -2451,6 +2460,13 @@ class SuGaR(nn.Module):
             scales=scales,
             rotations=quaternions,
             cov3D_precomp=cov3D)
+        
+        # Handle different versions of the rasterizer (some return 2 values, some return 3)
+        try:
+            rendered_image, radii, invdepths = rasterizer_output
+        except ValueError:
+            # Older version returns only 2 values
+            rendered_image, radii = rasterizer_output
         rendered_image = rendered_image.permute(1,2,0)
         rendered_image = torch.clamp((rendered_image + 1) / 2, 0, 1.)
         image = rendered_image.detach().cpu().numpy() * 255

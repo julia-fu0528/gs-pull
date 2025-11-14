@@ -13,3 +13,4 @@ pixi run install_udf
 
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH
+pixi run python -m pip install 'git+https://github.com/facebookresearch/pytorch3d.git@v0.7.4' --no-build-isolation

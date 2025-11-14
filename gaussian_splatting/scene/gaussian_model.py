@@ -16,7 +16,7 @@ from torch import nn
 import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
-from utils.sh_utils import RGB2SH
+from utils.sh_utils import RGB2SH, SH2RGB
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
@@ -190,21 +190,73 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
+    def save_ply(self, path, global_mask=None):
         mkdir_p(os.path.dirname(path))
 
-        xyz = self._xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
+        xyz = self._xyz.detach().cpu()
+        normals = torch.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu()
+        opacities = self._opacity.detach().cpu()
+        scale = self._scaling.detach().cpu()
+        rotation = self._rotation.detach().cpu()
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        if global_mask is not None:
+            # Convert global_mask to CPU if it's a tensor
+            if torch.is_tensor(global_mask):
+                global_mask = global_mask.detach().cpu()
+            # Apply mask to filter tensors
+            xyz = xyz[global_mask]
+            f_dc = f_dc[global_mask]
+            f_rest = f_rest[global_mask]
+            opacities = opacities[global_mask]
+            scale = scale[global_mask]
+            rotation = rotation[global_mask]
+            normals = normals[global_mask]
+        
+        # Convert SH DC component to RGB for visualization
+        # _features_dc shape: [N, 1, 3] -> after transpose(1,2).flatten(start_dim=1) -> [N, 3]
+        # f_dc contains SH coefficients, convert to RGB
+        # Extract the DC component (first 3 values are RGB SH coefficients)
+        if f_dc.shape[1] >= 3:
+            sh_dc = f_dc[:, :3]  # [N, 3] SH coefficients for RGB
+        else:
+            # Fallback if shape is unexpected
+            sh_dc = f_dc
+        rgb = SH2RGB(sh_dc)  # Convert SH coefficients to RGB [N, 3] in range [0, 1]
+        rgb = torch.clamp(rgb, 0.0, 1.0)  # Clamp to valid range
+        rgb = (rgb * 255.0).byte()  # Convert to uint8 [0, 255] for PLY
+        
+        # Convert to numpy
+        xyz = xyz.numpy()
+        normals = normals.numpy()
+        f_dc = f_dc.numpy()
+        f_rest = f_rest.numpy()
+        opacities = opacities.numpy()
+        scale = scale.numpy()
+        rotation = rotation.numpy()
+        rgb = rgb.numpy()
+        
+        # Create dtype with RGB colors for visualization (standard PLY format)
+        dtype_full = [
+            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1'),
+            ('opacity', 'f4'),
+        ]
+        # Add SH coefficients for compatibility
+        for i in range(f_dc.shape[1]):
+            dtype_full.append(('f_dc_{}'.format(i), 'f4'))
+        for i in range(f_rest.shape[1]):
+            dtype_full.append(('f_rest_{}'.format(i), 'f4'))
+        for i in range(scale.shape[1]):
+            dtype_full.append(('scale_{}'.format(i), 'f4'))
+        for i in range(rotation.shape[1]):
+            dtype_full.append(('rot_{}'.format(i), 'f4'))
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        # Pack attributes: xyz, normals, rgb, opacity, then SH and other params
+        attributes = np.concatenate((xyz, normals, rgb, opacities.reshape(-1, 1), f_dc, f_rest, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)

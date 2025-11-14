@@ -88,7 +88,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int, default=0, help='Index of GPU device to use.')
 
     # ours
-    parser.add_argument('--dataset_name', default="real360", help='blender, real360, relight3d')
+    parser.add_argument('--dataset_name', default="real360", help='blender, real360, relight3d, brics')
     parser.add_argument('-w', '--white_bg', action='store_true', help="Use white background (default: False)")        # dtu black; tnt white; mipnerf360 white
     parser.add_argument('--output', type=str, default='output/mipnerf360', help='output directory(do not include experiment name')    # TODO: change this
     parser.add_argument('--resolution', type=int, default=1, help='image resolution. (Courthouse 2 especially)')    # TODO: change this
