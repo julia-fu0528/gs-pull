@@ -22,7 +22,9 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
-
+from PIL import Image
+import numpy as np
+import zarr
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
@@ -32,7 +34,18 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         rendering = render(view, gaussians, pipeline, background)["render"]
-        gt = view.original_image[0:3, :, :]
+        # gt = view.original_image[0:3, :, :]
+        mask = zarr.open(view.mask_path, mode="r")
+        mask_frame_idx = getattr(view, 'mask_frame_idx', None) or getattr(view, 'time_idx', None)
+        mask = mask[mask_frame_idx, :, :]
+        mask = torch.from_numpy(mask).float()  # (H, W)
+        mask = mask.unsqueeze(0)  # (1, H, W) - add channel dimension for broadcasting
+        gt = Image.open(view.image_path).convert("RGB")
+        gt = gt.resize((view.image_width, view.image_height))
+        gt = torch.from_numpy(np.array(gt)).float() / 255.0  # Convert to tensor [0,1], shape (H, W, 3)
+        gt = gt.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W) - permute to CHW and add batch dimension
+        gt[0, :3, :, :] = gt[0, :3, :, :] * mask  # Broadcast mask (1, H, W) to (3, H, W)
+        gt = gt.cuda()
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 

@@ -4,6 +4,12 @@ import numpy as np
 import random
 from sugar_utils.general_utils import str2bool
 from sugar_trainers.coarse_sdf import coarse_training_with_sdf_regularization
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
 
 
 class AttrDict(dict):
@@ -92,9 +98,13 @@ if __name__ == "__main__":
     parser.add_argument('-w', '--white_bg', action='store_true', help="Use white background (default: False)")        # dtu black; tnt white; mipnerf360 white
     parser.add_argument('--output', type=str, default='output/mipnerf360', help='output directory(do not include experiment name')    # TODO: change this
     parser.add_argument('--resolution', type=int, default=1, help='image resolution. (Courthouse 2 especially)')    # TODO: change this
-
+    parser.add_argument('--remove_cams', type=str, default=None, help='Comma-separated list of camera indices to remove.')
     # Parse arguments
     args = parser.parse_args()
+    if args.remove_cams is not None:
+        remove_cams = args.remove_cams.split(',')
+    else:
+        remove_cams = None
     if args.low_poly:
         args.n_vertices_in_mesh = 200_000
         args.gaussians_per_triangle = 6
@@ -128,5 +138,20 @@ if __name__ == "__main__":
         'dataset_name': args.dataset_name,
         'white_bg': args.white_bg,
         'image_resolution': args.resolution,
+        'remove_cams': remove_cams,
     })
-    coarse_sugar_path = coarse_training_with_sdf_regularization(coarse_args)
+    
+    # Initialize wandb if available
+    wandb_run = None
+    if WANDB_AVAILABLE:
+        wandb_run = wandb.init(
+            project="sugar-pull",
+            name=args.scene_path.split("/")[-1] if args.scene_path else "sugar-run",
+            config=vars(coarse_args),
+        )
+        print(f"W&B URL: {wandb_run.url}")
+    
+    coarse_sugar_path = coarse_training_with_sdf_regularization(coarse_args, wandb_run=wandb_run)
+    
+    if wandb_run is not None:
+        wandb_run.finish()

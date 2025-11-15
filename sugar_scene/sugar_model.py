@@ -2187,13 +2187,15 @@ class SuGaR(nn.Module):
             checkpoint[k] = v
         torch.save(checkpoint, path)
 
-    def save_ply(self, checkpoint_path='.', iteration=0):
+    def save_ply(self, checkpoint_path='.', iteration=0, global_mask=None):
         point_cloud_path = os.path.join(checkpoint_path, "point_cloud/iteration_{}".format(iteration))
         os.makedirs(point_cloud_path, exist_ok=True)
         save_path = os.path.join(point_cloud_path, "point_cloud.ply")
 
         def construct_list_of_attributes():
             l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+            # Add RGB colors for visualization
+            l.extend(['red', 'green', 'blue'])
             # All channels except the 3 DC
             for i in range(self._sh_coordinates_dc.shape[1] * self._sh_coordinates_dc.shape[2]):
                 l.append('f_dc_{}'.format(i))
@@ -2206,18 +2208,73 @@ class SuGaR(nn.Module):
                 l.append('rot_{}'.format(i))
             return l
 
-        xyz = self._points.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = self._sh_coordinates_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._sh_coordinates_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self.all_densities.detach().cpu().numpy()
-        scale = self._scales.detach().cpu().numpy()
-        rotation = self._quaternions.detach().cpu().numpy()
+        xyz = self._points.detach().cpu()
+        normals = torch.zeros_like(xyz)
+        
+        # Apply global_mask if provided (for consistency with Gaussian Splatting version)
+        # Note: If filtering was already applied via prune_points(), the mask is just for reference
+        if global_mask is not None:
+            # Convert global_mask to CPU if it's a tensor
+            if torch.is_tensor(global_mask):
+                global_mask = global_mask.detach().cpu()
+            # Apply mask to filter tensors
+            xyz = xyz[global_mask]
+            normals = normals[global_mask]
+        
+        # Extract RGB colors from SH coefficients (DC component)
+        sh_dc = self._sh_coordinates_dc[:, 0, :].detach().cpu()  # [N, 3] SH DC coefficients
+        rgb = SH2RGB(sh_dc)  # Convert SH to RGB [N, 3] in range [0, 1]
+        rgb = torch.clamp(rgb, 0.0, 1.0)  # Clamp to valid range
+        rgb = (rgb * 255.0).byte()  # Convert to uint8 [0, 255] for PLY
+        
+        f_dc = self._sh_coordinates_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu()
+        f_rest = self._sh_coordinates_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu()
+        opacities = self.all_densities.detach().cpu()
+        scale = self._scales.detach().cpu()
+        rotation = self._quaternions.detach().cpu()
+        
+        # Apply global_mask to all tensors if provided
+        if global_mask is not None:
+            if torch.is_tensor(global_mask):
+                global_mask = global_mask.detach().cpu()
+            rgb = rgb[global_mask]
+            f_dc = f_dc[global_mask]
+            f_rest = f_rest[global_mask]
+            opacities = opacities[global_mask]
+            scale = scale[global_mask]
+            rotation = rotation[global_mask]
+        
+        # Convert to numpy
+        xyz = xyz.numpy()
+        normals = normals.numpy()
+        rgb = rgb.numpy()
+        f_dc = f_dc.numpy()
+        f_rest = f_rest.numpy()
+        opacities = opacities.numpy()
+        scale = scale.numpy()
+        rotation = rotation.numpy()
 
-        dtype_full = [(attribute, 'f4') for attribute in construct_list_of_attributes()]
+        # Create dtype with proper types (RGB as uint8, others as float32)
+        dtype_full = [
+            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1'),
+        ]
+        # Add SH coefficients
+        for i in range(f_dc.shape[1]):
+            dtype_full.append(('f_dc_{}'.format(i), 'f4'))
+        for i in range(f_rest.shape[1]):
+            dtype_full.append(('f_rest_{}'.format(i), 'f4'))
+        dtype_full.append(('opacity', 'f4'))
+        # Add scales and rotations
+        for i in range(scale.shape[1]):
+            dtype_full.append(('scale_{}'.format(i), 'f4'))
+        for i in range(rotation.shape[1]):
+            dtype_full.append(('rot_{}'.format(i), 'f4'))
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        # Pack attributes: xyz, normals, rgb, f_dc, f_rest, opacities, scale, rotation
+        attributes = np.concatenate((xyz, normals, rgb, f_dc, f_rest, opacities.reshape(-1, 1), scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(save_path)
@@ -2344,9 +2401,16 @@ class SuGaR(nn.Module):
 
     def visual_point_cloud(self, iteration=0, checkpoint_path='.'):
         xyz = self.points.detach().cpu().numpy()
+        # Extract colors from SH coefficients (DC component)
+        sh_dc = self._sh_coordinates_dc[:, 0, :].detach().cpu()  # [N, 3] SH DC coefficients
+        rgb = SH2RGB(sh_dc)  # Convert SH to RGB [N, 3] in range [0, 1]
+        rgb = torch.clamp(rgb, 0.0, 1.0)  # Clamp to valid range
+        rgb = (rgb * 255.0).byte().numpy()  # Convert to uint8 [0, 255]
         output_path = os.path.join(checkpoint_path, 'meshes')
         os.makedirs(output_path, exist_ok=True)
-        trimesh.Trimesh(xyz).export(os.path.join(output_path, 'points_' + str(iteration) + '.ply'))
+        # Create mesh with vertex colors
+        mesh = trimesh.Trimesh(vertices=xyz, vertex_colors=rgb)
+        mesh.export(os.path.join(output_path, 'points_' + str(iteration) + '.ply'))
         print('Visualize Points OK.')
 
     def visual_moved_point_cloud(self, iteration=0, checkpoint_path='.'):
@@ -2360,9 +2424,16 @@ class SuGaR(nn.Module):
                 moved_pts = pts - grad_norm * sdf
                 moved.append(moved_pts.detach())
         moved = torch.cat(moved, 0).cpu().detach().numpy()
+        # Extract colors from SH coefficients (DC component)
+        sh_dc = self._sh_coordinates_dc[:, 0, :].detach().cpu()  # [N, 3] SH DC coefficients
+        rgb = SH2RGB(sh_dc)  # Convert SH to RGB [N, 3] in range [0, 1]
+        rgb = torch.clamp(rgb, 0.0, 1.0)  # Clamp to valid range
+        rgb = (rgb * 255.0).byte().numpy()  # Convert to uint8 [0, 255]
         output_path = os.path.join(checkpoint_path, 'meshes')
         os.makedirs(output_path, exist_ok=True)
-        trimesh.Trimesh(moved).export(os.path.join(output_path, 'points_moved_' + str(iteration) + '.ply'))
+        # Create mesh with vertex colors
+        mesh = trimesh.Trimesh(vertices=moved, vertex_colors=rgb)
+        mesh.export(os.path.join(output_path, 'points_moved_' + str(iteration) + '.ply'))
         print('Visualize Moved Points OK.')
         torch.cuda.empty_cache()
 

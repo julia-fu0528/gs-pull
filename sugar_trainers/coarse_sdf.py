@@ -21,9 +21,29 @@ from rich.console import Console
 import time
 import shutil
 from tensorboardX import SummaryWriter
+import sys
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+
+def to_wandb_img(t: torch.Tensor):
+    """
+    Convert torch tensor to wandb.Image
+    t: [C,H,W] or [1,3,H,W] float in [0,1] on CUDA
+    returns a wandb.Image
+    """
+    if not WANDB_AVAILABLE:
+        return None
+    if t.dim() == 4: 
+        t = t[0]
+    t = t.detach().clamp(0,1).permute(1,2,0).cpu().numpy()  # HWC
+    return wandb.Image(t)
 
 
-def coarse_training_with_sdf_regularization(args):
+def coarse_training_with_sdf_regularization(args, wandb_run=None):
     CONSOLE = Console(width=120)
 
     # ====================Parameters====================
@@ -133,6 +153,9 @@ def coarse_training_with_sdf_regularization(args):
             sample_only_in_gaussians_close_to_surface = True
             close_gaussian_threshold = 2.  # 2.
             
+            # Threshold for pulling: only pull Gaussians within this SDF distance from surface
+            pull_sdf_distance_threshold = 0.05  # Only pull Gaussians within 0.05 units of surface
+            
             backpropagate_gradients_through_depth = False  # True
             
         use_sdf_better_normal_loss = False
@@ -169,14 +192,21 @@ def coarse_training_with_sdf_regularization(args):
 
     # -----Log and save-----
     print_loss_every_n_iterations = 50
-    save_model_every_n_iterations = 2000
+    save_model_every_n_iterations = 1000
 
     # ====================End of parameters====================
 
     source_path = args.scene_path
     gs_checkpoint_path = args.checkpoint_path
-    iteration_to_load = args.iteration_to_load    
+    iteration_to_load = args.iteration_to_load
     
+    # Get remove_cams from args if available, otherwise default to empty list
+    remove_cams = getattr(args, 'remove_cams', [])
+    if isinstance(remove_cams, str):
+        # If it's a string, split by comma or newline
+        remove_cams = [s.strip() for s in remove_cams.replace('\n', ',').split(',') if s.strip()]
+    elif remove_cams is None:
+        remove_cams = []
 
     sugar_checkpoint_path = args.output_dir
     
@@ -223,6 +253,28 @@ def coarse_training_with_sdf_regularization(args):
         image_resolution=args.image_resolution,
         )
 
+    # Filter out cameras whose image_path contains any string from remove_cams
+    if remove_cams:
+        original_count = len(nerfmodel.training_cameras)
+        filtered_cam_list = []
+        for cam in nerfmodel.training_cameras.gs_cameras:
+            image_path = getattr(cam, 'image_path', None)
+            if image_path is None:
+                # Fallback to image_name if image_path not available
+                image_path = getattr(cam, 'image_name', '')
+            
+            # Check if image_path contains any string from remove_cams
+            should_remove = any(remove_str in str(image_path) for remove_str in remove_cams)
+            if not should_remove:
+                filtered_cam_list.append(cam)
+        
+        # Update training cameras with filtered list
+        from sugar_scene.cameras import CamerasWrapper
+        nerfmodel.training_cameras = CamerasWrapper(filtered_cam_list)
+        nerfmodel.cam_list = filtered_cam_list
+        CONSOLE.print(f'Filtered cameras: {original_count} -> {len(filtered_cam_list)} (removed {original_count - len(filtered_cam_list)} cameras)')
+        CONSOLE.print(f'Removed cameras containing: {remove_cams}')
+    
     CONSOLE.print(f'{len(nerfmodel.training_cameras)} training images detected.')
     CONSOLE.print(f'The model has been trained for {iteration_to_load} steps.')
 
@@ -243,11 +295,15 @@ def coarse_training_with_sdf_regularization(args):
             from sugar_utils.spherical_harmonics import SH2RGB
             points = nerfmodel.gaussians.get_xyz.detach().float().cuda()
             colors = SH2RGB(nerfmodel.gaussians.get_features[:, 0].detach().float().cuda())
+            
             if prune_at_start:
                 with torch.no_grad():
                     start_prune_mask = nerfmodel.gaussians.get_opacity.view(-1) > start_pruning_threshold
                     points = points[start_prune_mask]
                     colors = colors[start_prune_mask]
+            else:
+                start_prune_mask = None
+            
             n_points = len(points)
     else:
         CONSOLE.print("\nLoading SfM point cloud...")
@@ -301,7 +357,8 @@ def coarse_training_with_sdf_regularization(args):
         if initialize_from_trained_3dgs:
             with torch.no_grad():
                 CONSOLE.print("Initializing 3D gaussians from 3D gaussians...")
-                if prune_at_start:
+                if start_prune_mask is not None:
+                    # Apply mask (either from global_mask filtering or opacity pruning)
                     sugar._scales[...] = nerfmodel.gaussians._scaling.detach()[start_prune_mask]
                     sugar._quaternions[...] = nerfmodel.gaussians._rotation.detach()[start_prune_mask]
                     sugar.all_densities[...] = nerfmodel.gaussians._opacity.detach()[start_prune_mask]
@@ -447,7 +504,7 @@ def coarse_training_with_sdf_regularization(args):
     train_normal = False
     has_not_pruned = True
     last_resample_iteration = last_save_iteration = last_reset_iteration = last_visual_iteration = -1
-    cur_part_num = sugar.part_num+1
+    cur_part_num = 1  # Start from part 1, will cycle through all parts
     evaluated_mesh = None
     for batch in range(9_999_999):
         if iteration >= num_iterations:
@@ -492,16 +549,20 @@ def coarse_training_with_sdf_regularization(args):
                 udfnet_lr = 0.
             optimizer.update_learning_rate(iteration, sdfnet_lr=udfnet_lr)
 
-            if iteration == 9001 and has_not_pruned:
+            # Opacity pruning milestone
+            opacity_prune_iteration = 9001
+            if iteration == opacity_prune_iteration and has_not_pruned:
                 print("Prunning Pointcloud Using Opacity...")
                 prune_mask = (gaussian_densifier.model.strengths < prune_hard_opacity_threshold).squeeze()
                 gaussian_densifier.prune_points(prune_mask)
                 print('After Prunning: {} Gaussians Left.'.format(sugar.points.shape[0]))
-                sugar.visual_point_cloud(iteration=9001, checkpoint_path=sugar_checkpoint_path)
-                sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=9000, scene_name=scene_name)
+                sugar.visual_point_cloud(iteration=opacity_prune_iteration, checkpoint_path=sugar_checkpoint_path)
+                sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=opacity_prune_iteration-1, scene_name=scene_name)
                 has_not_pruned = False
 
-            if iteration % 1000 == 0 and iteration != last_resample_iteration and iteration > 9500:
+            # Resample threshold - starts 500 iterations after SDF training begins
+            resample_start_iteration = 9000 + 500
+            if iteration % 1000 == 0 and iteration != last_resample_iteration and iteration > resample_start_iteration:
                 if iteration % 2000 == 0:
                     print('Recalculating Sample Points...')
                     sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=iteration, scene_name=scene_name)
@@ -516,6 +577,7 @@ def coarse_training_with_sdf_regularization(args):
             # Computing rgb predictions
             loss = render_loss = opacity_loss = scaling_loss = sdf_loss = normal_loss = 0
             pred_rgb = None
+            gt_rgb = None
             if train_render:
                 outputs = sugar.render_image_gaussian_rasterizer(
                     camera_indices=camera_indices.item(),
@@ -583,6 +645,7 @@ def coarse_training_with_sdf_regularization(args):
                     clamped_scaling = torch.clamp(sugar.scaling.min(1)[0], min=1e-4)
                     scaling_loss = torch.abs(clamped_scaling - 1e-4).mean()
                     loss = loss + 100 * scaling_loss
+
                 # pulling loss
                 if train_sdf:
                     sugar_points = sugar.points
@@ -593,6 +656,20 @@ def coarse_training_with_sdf_regularization(args):
                     sdf_network = getattr(sugar.neus, 'sdf_network'+str(cur_part_num))
                     gradients_sample = sdf_network.gradient(samples).squeeze()  # 5000x3
                     udf_sample = sdf_network.sdf(samples)  # 5000x1
+                    
+                    # Clamp SDF values to prevent extreme movements that cause noise
+                    # At iteration 9000, SDF network is untrained, so clamp to reasonable range
+                    # Gradually increase clamp (reduced max to pull less aggressively): 0.1 (9000-10000) -> 0.2 (10000-11000) -> 0.4 (11000-12000) -> 0.6 (12000+)
+                    if iteration < start_sdf_regularization_from + 1000:
+                        udf_clamp_max = 0.1
+                    elif iteration < start_sdf_regularization_from + 2000:
+                        udf_clamp_max = 0.2  # Reduced from 0.3
+                    elif iteration < start_sdf_regularization_from + 3000:
+                        udf_clamp_max = 0.4  # Reduced from 0.6
+                    else:
+                        udf_clamp_max = 0.6  # Reduced from 1.0 to limit maximum movement
+                    udf_sample = torch.clamp(udf_sample, min=-udf_clamp_max, max=udf_clamp_max)
+                    
                     grad_norm = F.normalize(gradients_sample, dim=1)  # 5000x3
                     sample_moved = samples - grad_norm * udf_sample  # 5000x3
 
@@ -605,7 +682,13 @@ def coarse_training_with_sdf_regularization(args):
                     #     return_full_matrix=True, return_sqrt=True, inverse_scales=True, scaling_factor=-1, enlarge_minaxis=-1)
                     gaussian_inv_scaled_rotation = sugar.get_covariance(
                         return_full_matrix=True, return_sqrt=True, inverse_scales=True, scaling_factor=100,enlarge_minaxis=100)
-                    batch_selected_idx = torch.arange(sugar.points.shape[0],device='cuda')[dataset.part_select_idx][dataset.downsample_idx][points_idx][knn_idx]
+                    # Fix indexing: part_select_idx is boolean mask, downsample_idx indexes into filtered subset
+                    # Get indices where part_select_idx is True
+                    part_indices = torch.where(dataset.part_select_idx)[0]  # indices into sugar.points
+                    # Apply downsample_idx to get downsampled indices into sugar.points
+                    downsampled_indices = part_indices[dataset.downsample_idx]
+                    # Apply points_idx and knn_idx
+                    batch_selected_idx = downsampled_indices[points_idx][knn_idx]
                     closest_gaussian_inv_scaled_rotation = gaussian_inv_scaled_rotation[batch_selected_idx].detach()
                     surf_points = points[knn_idx].detach().clone() * dataset.shape_scale + dataset.shape_center
 
@@ -621,20 +704,77 @@ def coarse_training_with_sdf_regularization(args):
 
                     # ours: pull gs
                     if iteration > 10000:   # delay for very large scene
-                        rescaled_sugar_points = (surf_points - dataset.shape_center) / dataset.shape_scale
+                        # Use the ACTUAL Gaussian positions, not surf_points (which are just other Gaussian positions)
+                        # This ensures we pull toward the actual SDF surface, not toward arbitrary Gaussian positions
+                        actual_gaussian_positions = sugar.points[batch_selected_idx]
+                        rescaled_sugar_points = (actual_gaussian_positions - dataset.shape_center) / dataset.shape_scale
                         _gradients_sample = sdf_network.gradient(rescaled_sugar_points).squeeze()
                         _udf_sample = sdf_network.sdf(rescaled_sugar_points)
-                        _grad_norm = F.normalize(_gradients_sample, dim=1)  #
-                        rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample
-                        sugar_points_moved = rescaled_sugar_points_moved * dataset.shape_scale + dataset.shape_center
-                        sugar_points_diff = torch.norm(sugar.points[batch_selected_idx] - sugar_points_moved.detach(), p=2, dim=-1).mean()
-                        sdf_loss = sdf_loss + 0.05 * sugar_points_diff
+                        
+                        # Squeeze to ensure 1D tensor for masking, but keep original for computation
+                        _udf_sample_1d = _udf_sample.squeeze(-1) if _udf_sample.dim() > 1 else _udf_sample
+                        
+                        # Only pull Gaussians that are close to the surface (within pull_sdf_distance_threshold)
+                        # This prevents pulling noise/outliers that are far from the surface
+                        close_to_surface_mask = torch.abs(_udf_sample_1d) < pull_sdf_distance_threshold
+                        # Ensure mask is 1D for indexing
+                        if close_to_surface_mask.dim() > 1:
+                            close_to_surface_mask = close_to_surface_mask.squeeze(-1)
+                        
+                        if close_to_surface_mask.sum() > 0:  # Only proceed if there are Gaussians close to surface
+                            # Clamp SDF values to prevent extreme movements (use same gradual clamp as above, reduced)
+                            if iteration < start_sdf_regularization_from + 1000:
+                                _udf_clamp_max = 0.1
+                            elif iteration < start_sdf_regularization_from + 2000:
+                                _udf_clamp_max = 0.2  # Reduced from 0.3
+                            elif iteration < start_sdf_regularization_from + 3000:
+                                _udf_clamp_max = 0.4  # Reduced from 0.6
+                            else:
+                                _udf_clamp_max = 0.6  # Reduced from 1.0
+                            _udf_sample = torch.clamp(_udf_sample, min=-_udf_clamp_max, max=_udf_clamp_max)
+                            _grad_norm = F.normalize(_gradients_sample, dim=1)  #
+                            # Move along gradient to surface: current_pos - normal * sdf_value
+                            # _udf_sample needs to be [N, 1] or [N] for broadcasting with _grad_norm [N, 3]
+                            if _udf_sample.dim() == 1:
+                                _udf_sample_broadcast = _udf_sample.unsqueeze(-1)  # [N] -> [N, 1]
+                            else:
+                                _udf_sample_broadcast = _udf_sample
+                            rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast
+                            sugar_points_moved = rescaled_sugar_points_moved * dataset.shape_scale + dataset.shape_center
+                            
+                            # Only compute loss for Gaussians close to surface
+                            close_sugar_points_diff = torch.norm(
+                                actual_gaussian_positions[close_to_surface_mask] - 
+                                sugar_points_moved[close_to_surface_mask].detach(), 
+                                p=2, dim=-1
+                            ).mean()
+                            
+                            # Gradually increase pulling strength more smoothly (reduced to pull less aggressively)
+                            # 0.005 (10000-11000) -> 0.01 (11000-12000) -> 0.015 (12000-13000) -> 0.02 (13000+)
+                            if iteration < start_sdf_regularization_from + 2000:
+                                pull_weight = 0.005  # Reduced from 0.01
+                            elif iteration < start_sdf_regularization_from + 3000:
+                                pull_weight = 0.01   # Reduced from 0.02
+                            elif iteration < start_sdf_regularization_from + 4000:
+                                pull_weight = 0.015  # Reduced from 0.03
+                            else:
+                                pull_weight = 0.02   # Reduced from 0.05
+                            sdf_loss = sdf_loss + pull_weight * close_sugar_points_diff
 
-                    loss = loss + sdf_loss
+                    # Gradually increase SDF loss weight to reduce noise at transition (9000)
+                    # Warmup: linearly increase from 0.1 to 1.0 over 1000 iterations after SDF starts
+                    sdf_warmup_iterations = 1000
+                    if iteration <= start_sdf_regularization_from + sdf_warmup_iterations:
+                        sdf_weight = 0.1 + 0.9 * (iteration - start_sdf_regularization_from) / sdf_warmup_iterations
+                        sdf_weight = max(0.1, min(1.0, sdf_weight))  # Clamp between 0.1 and 1.0
+                    else:
+                        sdf_weight = 1.0
+                    
+                    loss = loss + sdf_weight * sdf_loss
                 # norm consistency
                 if train_normal:
                     assert train_sdf, 'require train_sdf=True for train_normal!'
-                    if iteration > 10000:   # delay for very large scene
+                    if iteration > 10000:   # delay for very large scene (GS training is 0-7000, then 7000-9000 is fine, so 10000 gives time for SDF to stabilize)
                         sugar_normals = sugar.get_normals()[batch_selected_idx]
                         surf_normals = _grad_norm.detach()
                         sugar_normal_loss = torch.abs(torch.sum(surf_normals * sugar_normals, -1).abs() - 1).mean()
@@ -659,6 +799,19 @@ def coarse_training_with_sdf_regularization(args):
                 logger.add_scalar('Loss/scaling_loss', scaling_loss, global_step=iteration)
                 logger.add_scalar('Loss/sdf_loss', sdf_loss, global_step=iteration)
                 logger.add_scalar('Loss/norm_loss', normal_loss, global_step=iteration)
+                
+                # Log to wandb
+                if wandb_run is not None and WANDB_AVAILABLE:
+                    wandb_run.log({
+                        "train/render_loss": render_loss,
+                        "train/opacity_loss": opacity_loss,
+                        "train/scaling_loss": scaling_loss,
+                        "train/sdf_loss": sdf_loss,
+                        "train/norm_loss": normal_loss,
+                        "train/total_loss": loss.item(),
+                        "train/num_points": sugar.points.shape[0],
+                        "train/iteration": iteration,
+                    }, step=iteration)
             # visualize mesh
             if (iteration % 500 == 0 and iteration != last_visual_iteration and iteration > 9000) or iteration == num_iterations:
                 with torch.no_grad():
@@ -680,8 +833,21 @@ def coarse_training_with_sdf_regularization(args):
                     combined_mesh.export(os.path.join(sugar_checkpoint_path, 'meshes', 'mcubes_merge_{}.ply'.format(iteration)))
 
                     sugar.visual_point_cloud(iteration, sugar_checkpoint_path)
-                    sugar.validate_image(pred_rgb, camera_indices.item(), iteration, sugar_checkpoint_path, )
-                    sugar.validate_normal_image(1, iteration, sugar_checkpoint_path)
+                    if train_render and pred_rgb is not None:
+                        sugar.validate_image(pred_rgb, camera_indices.item(), iteration, sugar_checkpoint_path, )
+                        sugar.validate_normal_image(1, iteration, sugar_checkpoint_path)
+                        
+                        # Log images to wandb
+                        if wandb_run is not None and WANDB_AVAILABLE:
+                            # pred_rgb and gt_rgb are [3, H, W] after transpose operations
+                            # Convert to [1, 3, H, W] format for wandb
+                            pred_img = to_wandb_img(pred_rgb.unsqueeze(0) if pred_rgb.dim() == 3 else pred_rgb)
+                            gt_img = to_wandb_img(gt_rgb.unsqueeze(0) if gt_rgb.dim() == 3 else gt_rgb)
+                            if pred_img is not None and gt_img is not None:
+                                wandb_run.log({
+                                    f"images/render_{iteration}": pred_img,
+                                    f"images/gt_{iteration}": gt_img,
+                                }, step=iteration)
                 last_visual_iteration = iteration
                 torch.cuda.empty_cache()
 
@@ -691,12 +857,13 @@ def coarse_training_with_sdf_regularization(args):
             optimizer.zero_grad(set_to_none = True)
             
             # Print loss
-            if _iter % 50 == 0:
+            if _iter % 500 == 0:
                 print(iteration, _iter, 'loss:', loss.item(), 'udflr:', udfnet_lr)
                 
             # Save model
             if iteration % save_model_every_n_iterations == 0 and iteration != last_save_iteration:
                 CONSOLE.print("Saving model...")
+                CONSOLE.print(f"  Saving point cloud ({sugar.points.shape[0]} Gaussians)")
                 model_path = os.path.join(sugar_checkpoint_path, f'{iteration}.pt')
                 sugar.save_model(path=model_path,
                                 train_losses=train_losses,
@@ -708,6 +875,7 @@ def coarse_training_with_sdf_regularization(args):
                 # if optimize_triangles and iteration >= optimize_triangles_from:
                 #     rm.save_model(os.path.join(rc_checkpoint_path, f'rm_{iteration}.pt'))
                 CONSOLE.print("Model saved.")
+                # Save SDF checkpoint if past SDF training start
                 if iteration > 9000:
                     sugar.neus.save_checkpoint(sugar_checkpoint_path, iteration)
                 last_save_iteration = iteration
@@ -720,6 +888,7 @@ def coarse_training_with_sdf_regularization(args):
 
     CONSOLE.print(f"Training finished after {num_iterations} iterations with loss={loss.detach().item()}.")
     CONSOLE.print("Saving final model...")
+    CONSOLE.print(f"  Final point cloud ({sugar.points.shape[0]} Gaussians)")
     model_path = os.path.join(sugar_checkpoint_path, f'{iteration}.pt')
     sugar.save_model(path=model_path,
                     train_losses=train_losses,

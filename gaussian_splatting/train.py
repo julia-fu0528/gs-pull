@@ -288,18 +288,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if rgb_dc.dim() == 3:  # e.g., [N,1,3]
                     rgb_dc = rgb_dc.squeeze(1)
                 brightness = 0.2126*rgb_dc[:,0] + 0.7152*rgb_dc[:,1] + 0.0722*rgb_dc[:,2]
-                bright_th = 0.2
+                bright_th = 0.3
                 non_black_mask = brightness > bright_th
                 
                 # For static model, we can optionally apply clustering filter here
                 # Uncomment if you want to use clustering:
-                distance_threshold = 0.2
+                distance_threshold = 0.1
                 if non_black_mask.sum() > 0:
                     cluster_mask = detect_and_filter_clusters(
                         xyz[non_black_mask],
                         gaussians.get_opacity[non_black_mask],
                         eps=distance_threshold,
-                        min_samples=20
+                        min_samples=35
                     )
                     global_mask = torch.zeros(len(xyz), dtype=torch.bool, device=xyz.device)
                     global_mask[non_black_mask] = cluster_mask

@@ -269,22 +269,23 @@ class GaussianModel:
     def load_ply(self, path):
         plydata = PlyData.read(path)
 
-        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
-                        np.asarray(plydata.elements[0]["y"]),
-                        np.asarray(plydata.elements[0]["z"])),  axis=1)
-        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        # Ensure arrays are contiguous by copying them
+        xyz = np.stack((np.asarray(plydata.elements[0]["x"]).copy(),
+                        np.asarray(plydata.elements[0]["y"]).copy(),
+                        np.asarray(plydata.elements[0]["z"]).copy()),  axis=1)
+        opacities = np.asarray(plydata.elements[0]["opacity"]).copy()[..., np.newaxis]
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
-        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
-        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
-        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"]).copy()
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"]).copy()
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"]).copy()
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
         assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
-            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name]).copy()
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
@@ -292,13 +293,21 @@ class GaussianModel:
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
-            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name]).copy()
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
         rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
-            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name]).copy()
+
+        # Ensure all arrays are contiguous before converting to tensors
+        xyz = np.ascontiguousarray(xyz)
+        opacities = np.ascontiguousarray(opacities)
+        features_dc = np.ascontiguousarray(features_dc)
+        features_extra = np.ascontiguousarray(features_extra)
+        scales = np.ascontiguousarray(scales)
+        rots = np.ascontiguousarray(rots)
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
