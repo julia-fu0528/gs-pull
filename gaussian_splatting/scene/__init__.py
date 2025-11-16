@@ -24,9 +24,10 @@ class Scene:
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, 
                  shuffle=True, resolution_scales=[1.0], brics=True, frame_idx=0):
-        """b
+        """
         :param path: Path to colmap scene main folder.
         """
+        self.frame_idx = frame_idx
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
@@ -88,11 +89,15 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-    def save(self, iteration, global_mask=None):
+    def save(self, iteration, global_mask=None, frame_idx=None):
+        # Use frame_idx from parameter if provided, otherwise use instance variable, default to 0
+        if frame_idx is None:
+            frame_idx = getattr(self, 'frame_idx', 0)
+        
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         unfiltered_point_cloud_path = os.path.join(self.model_path, "point_cloud/unfiltered_iteration_{}".format(iteration))
-        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"), global_mask=global_mask)
-        self.gaussians.save_ply(os.path.join(unfiltered_point_cloud_path, "point_cloud.ply"), global_mask=None)
+        self.gaussians.save_ply(os.path.join(point_cloud_path, f"{frame_idx:06d}.ply"), global_mask=global_mask)
+        self.gaussians.save_ply(os.path.join(unfiltered_point_cloud_path, f"{frame_idx:06d}.ply"), global_mask=None)
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]

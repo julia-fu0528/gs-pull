@@ -81,7 +81,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
     # -----Optimization parameters-----
 
     # Learning rates and scheduling
-    num_iterations = 15_000
+    num_iterations = 35_000
 
     spatial_lr_scale = None
     position_lr_init=0.00016
@@ -698,7 +698,23 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                     # Apply downsample_idx to get downsampled indices into sugar.points
                     downsampled_indices = part_indices[dataset.downsample_idx]
                     # Apply points_idx and knn_idx
-                    batch_selected_idx = downsampled_indices[points_idx][knn_idx]
+                    # Safety check: ensure points_idx is within bounds
+                    if len(downsampled_indices) > 0:
+                        points_idx = torch.clamp(points_idx, 0, len(downsampled_indices) - 1)
+                    
+                    # Get intermediate result
+                    intermediate_indices = downsampled_indices[points_idx]
+                    
+                    # Safety check: ensure knn_idx is within bounds for intermediate_indices
+                    if len(intermediate_indices) > 0:
+                        knn_idx = torch.clamp(knn_idx, 0, len(intermediate_indices) - 1)
+                    
+                    batch_selected_idx = intermediate_indices[knn_idx]
+                    
+                    # Safety check: ensure indices are within bounds for gaussian_inv_scaled_rotation
+                    max_idx = gaussian_inv_scaled_rotation.shape[0] - 1
+                    batch_selected_idx = torch.clamp(batch_selected_idx, 0, max_idx)
+                    
                     closest_gaussian_inv_scaled_rotation = gaussian_inv_scaled_rotation[batch_selected_idx].detach()
                     surf_points = points[knn_idx].detach().clone() * dataset.shape_scale + dataset.shape_center
 
@@ -707,20 +723,28 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                     neighbor_opacities = (warped_shift[..., 0] * warped_shift[..., 0]).sum(dim=-1).clamp(min=0., max=1e8)
                     neighbor_opacities = torch.exp(-1. / 2 * neighbor_opacities)
                     if iteration > 10000:
-                        sdf_loss2 = torch.abs(1-neighbor_opacities)[neighbor_opacities>0.9].mean()
+                        # Add safety check to avoid indexing errors
+                        valid_opacity_mask = neighbor_opacities > 0.9
+                        if valid_opacity_mask.any():
+                            sdf_loss2 = torch.abs(1-neighbor_opacities[valid_opacity_mask]).mean()
+                        else:
+                            sdf_loss2 = 0.
                     else:
                         sdf_loss2 = 0.
                     sdf_loss = 1.0 * sdf_loss1 + 1.0 * sdf_loss2
 
-                    # ours: pull gs
+                     # ours: pull gs
                     if iteration > 10000:   # delay for very large scene
+                        # Ensure batch_selected_idx is within bounds
+                        max_idx = sugar.points.shape[0] - 1
+                        batch_selected_idx = torch.clamp(batch_selected_idx, 0, max_idx)
+                        
                         # Use the ACTUAL Gaussian positions, not surf_points (which are just other Gaussian positions)
                         # This ensures we pull toward the actual SDF surface, not toward arbitrary Gaussian positions
                         actual_gaussian_positions = sugar.points[batch_selected_idx]
                         rescaled_sugar_points = (actual_gaussian_positions - dataset.shape_center) / dataset.shape_scale
                         _gradients_sample = sdf_network.gradient(rescaled_sugar_points).squeeze()
                         _udf_sample = sdf_network.sdf(rescaled_sugar_points)
-                        # SDF sign flipping is now handled inside the network's sdf() method
                         
                         # Squeeze to ensure 1D tensor for masking, but keep original for computation
                         _udf_sample_1d = _udf_sample.squeeze(-1) if _udf_sample.dim() > 1 else _udf_sample
@@ -732,22 +756,33 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                         if close_to_surface_mask.dim() > 1:
                             close_to_surface_mask = close_to_surface_mask.squeeze(-1)
                         
-                        if close_to_surface_mask.sum() > 0:  # Only proceed if there are Gaussians close to surface
-                            # Clamp SDF values to prevent extreme movements (use same gradual clamp as above, reduced)
+                        # Check that GS points are within their own Gaussian distributions
+                        # Compute density at GS point positions to ensure they're part of the GS distribution
+                        # Points with low density are likely outliers/noise clusters outside the main GS distribution
+                        try:
+                            gs_densities = sugar.compute_density(actual_gaussian_positions, density_factor=1.0)
+                            # Only pull points with sufficient density (within GS distribution)
+                            within_gs_mask = gs_densities > 0.1  # Threshold for being within GS distribution
+                        except:
+                            # If density computation fails, skip the density check
+                            within_gs_mask = torch.ones_like(close_to_surface_mask, dtype=torch.bool)
+                        
+                        # Combine both masks: must be close to surface AND within GS distribution
+                        combined_mask = close_to_surface_mask & within_gs_mask
+                        
+                        if combined_mask.sum() > 0:  # Only proceed if there are Gaussians that satisfy both conditions
+                            # Clamp SDF values to prevent extreme movements (use same gradual clamp as above)
                             if iteration < start_sdf_regularization_from + 1000:
                                 _udf_clamp_max = 0.1
                             elif iteration < start_sdf_regularization_from + 2000:
-                                _udf_clamp_max = 0.2  # Reduced from 0.3
+                                _udf_clamp_max = 0.2
                             elif iteration < start_sdf_regularization_from + 3000:
-                                _udf_clamp_max = 0.4  # Reduced from 0.6
+                                _udf_clamp_max = 0.4
                             else:
-                                _udf_clamp_max = 0.6  # Reduced from 1.0
+                                _udf_clamp_max = 0.6
                             _udf_sample = torch.clamp(_udf_sample, min=-_udf_clamp_max, max=_udf_clamp_max)
-                            _grad_norm = F.normalize(_gradients_sample, dim=1)  #
+                            _grad_norm = F.normalize(_gradients_sample, dim=1)
                             # Move along gradient to surface: current_pos - normal * sdf_value
-                            # When SDF is flipped at network level, both SDF and gradient are negated
-                            # The standard formula should work: rescaled_sugar_points - _grad_norm * _udf_sample
-                            # Because: points - (-grad) * (-sdf) = points - grad * sdf (negatives cancel)
                             # _udf_sample needs to be [N, 1] or [N] for broadcasting with _grad_norm [N, 3]
                             if _udf_sample.dim() == 1:
                                 _udf_sample_broadcast = _udf_sample.unsqueeze(-1)  # [N] -> [N, 1]
@@ -756,39 +791,21 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                             rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast
                             sugar_points_moved = rescaled_sugar_points_moved * dataset.shape_scale + dataset.shape_center
                             
-                            # Only compute loss for Gaussians close to surface
-                            close_sugar_points_diff = torch.norm(
-                                actual_gaussian_positions[close_to_surface_mask] - 
-                                sugar_points_moved[close_to_surface_mask].detach(), 
+                            # Only compute loss for Gaussians that are both close to surface AND within GS
+                            combined_sugar_points_diff = torch.norm(
+                                actual_gaussian_positions[combined_mask] - 
+                                sugar_points_moved[combined_mask].detach(), 
                                 p=2, dim=-1
                             ).mean()
                             
-                            # Gradually increase pulling strength more smoothly (reduced to pull less aggressively)
-                            # 0.005 (10000-11000) -> 0.01 (11000-12000) -> 0.015 (12000-13000) -> 0.02 (13000+)
-                            if iteration < start_sdf_regularization_from + 2000:
-                                pull_weight = 0.005  # Reduced from 0.01
-                            elif iteration < start_sdf_regularization_from + 3000:
-                                pull_weight = 0.01   # Reduced from 0.02
-                            elif iteration < start_sdf_regularization_from + 4000:
-                                pull_weight = 0.015  # Reduced from 0.03
-                            else:
-                                pull_weight = 0.02   # Reduced from 0.05
-                            sdf_loss = sdf_loss + pull_weight * close_sugar_points_diff
-
-                    # Gradually increase SDF loss weight to reduce noise at transition (9000)
-                    # Warmup: linearly increase from 0.1 to 1.0 over 1000 iterations after SDF starts
-                    sdf_warmup_iterations = 1000
-                    if iteration <= start_sdf_regularization_from + sdf_warmup_iterations:
-                        sdf_weight = 0.1 + 0.9 * (iteration - start_sdf_regularization_from) / sdf_warmup_iterations
-                        sdf_weight = max(0.1, min(1.0, sdf_weight))  # Clamp between 0.1 and 1.0
-                    else:
-                        sdf_weight = 1.0
+                            sdf_loss = sdf_loss + 0.05 * combined_sugar_points_diff
                     
-                    loss = loss + sdf_weight * sdf_loss
+                    loss = loss + sdf_loss
+                
                 # norm consistency
                 if train_normal:
                     assert train_sdf, 'require train_sdf=True for train_normal!'
-                    if iteration > 10000:   # delay for very large scene (GS training is 0-7000, then 7000-9000 is fine, so 10000 gives time for SDF to stabilize)
+                    if iteration > 10000:   # delay for very large scene
                         sugar_normals = sugar.get_normals()[batch_selected_idx]
                         surf_normals = _grad_norm.detach()
                         sugar_normal_loss = torch.abs(torch.sum(surf_normals * sugar_normals, -1).abs() - 1).mean()

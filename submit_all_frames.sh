@@ -3,8 +3,8 @@
 # Option 1: Submit as array job (10 frames per GPU, 48 GPUs total)
 # Option 2: Submit individual jobs (1 frame per GPU, 480 GPUs total)
 
-TOTAL_FRAMES=27
-FRAMES_PER_GPU=1
+TOTAL_FRAMES=480
+FRAMES_PER_GPU=10
 NUM_GPUS=$(( (TOTAL_FRAMES + FRAMES_PER_GPU - 1) / FRAMES_PER_GPU ))  # Ceiling division
 
 echo "Total frames: ${TOTAL_FRAMES}"

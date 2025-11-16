@@ -329,7 +329,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #         deformed_params[time_value] = (d_xyz, d_rotation, d_scaling)
                 
                 # Save with optional parameters (scene.save needs to be updated to accept these)
-                scene.save(iteration, global_mask=global_mask)
+                scene.save(iteration, global_mask=global_mask, frame_idx=frame_idx)
                 # If scene.save supports it: scene.save(iteration, deformed_params=deformed_params, global_mask=global_mask)
                 
                 snap_dir = os.path.join(args.model_path, "point_cloud/iteration_{}".format(iteration))
