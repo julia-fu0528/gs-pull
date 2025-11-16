@@ -14,9 +14,9 @@ export PYTHONNOUSERSITE=1
 
 unset PYTHONPATH
 python train.py \
-    -s /users/wfu16/data/users/wfu16/datasets/2025-10-29-cloth/episode_0000 \
-    -c /users/wfu16/data/users/wfu16/datasets/2025-10-29-cloth/episode_0000 \
-    -i 15000 \
-    --output /users/wfu16/data/users/wfu16/datasets/2025-10-29-cloth/episode_0000 \
+    -s /users/wfu16/data/users/wfu16/datasets/2025-11-15/episode_0000 \
+    -c /users/wfu16/data/users/wfu16/datasets/2025-11-15/episode_0000 \
+    -i 14000 \
+    --output /users/wfu16/data/users/wfu16/datasets/2025-11-15/episode_0000 \
     --dataset_name brics --eval True \
     # --remove_cams $REMOVE_CAMS

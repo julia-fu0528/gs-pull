@@ -734,14 +734,14 @@ def readBRICSCameras(params, images_folder, white_background, frame_idx, num_fra
 
     return cam_infos
 
-def readBricsSceneInfo(path, white_background, eval, extension=".png", start_frame=0, end_frame=20000, num_frames=20000):
+def readBricsSceneInfo(path, white_background, eval, extension=".png", frame_idx=0):
     images_folder = path
     filename = 'metric_params_undistorted.txt'
     params = read_params(os.path.join(images_folder, '..', filename))
     
     print(f"filename: {filename}")
     print(f"Total cameras: {len(params)}")
-    print(f"Loading only frame {start_frame} (single timestep)")
+    print(f"Loading only frame {frame_idx} (single timestep)")
     
     # Split cameras for train/test (80% train, 20% test)
     num_cameras = len(params)
@@ -759,9 +759,11 @@ def readBricsSceneInfo(path, white_background, eval, extension=".png", start_fra
     print(f"Test cameras: {len(test_camera_indices)} ({test_camera_indices[:5]}...)" if len(test_camera_indices) > 5 else f"Test cameras: {len(test_camera_indices)} ({test_camera_indices})")
     
     print("Reading Training Cameras (single frame)")
-    train_cam_infos = readBRICSCameras(params, images_folder, white_background, start_frame, num_frames, camera_indices=train_camera_indices)
+    # Use a dummy num_frames value for time normalization (not critical for single frame)
+    num_frames = 1
+    train_cam_infos = readBRICSCameras(params, images_folder, white_background, frame_idx, num_frames, camera_indices=train_camera_indices)
     print("Reading Test Cameras (single frame)")
-    test_cam_infos = readBRICSCameras(params, images_folder, white_background, start_frame, num_frames, camera_indices=test_camera_indices)
+    test_cam_infos = readBRICSCameras(params, images_folder, white_background, frame_idx, num_frames, camera_indices=test_camera_indices)
     
     if not eval:
         train_cam_infos.extend(test_cam_infos)

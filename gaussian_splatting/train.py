@@ -138,11 +138,11 @@ def to_wandb_img(t: torch.Tensor):
     return wandb.Image(t)
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from
-             , wandb_run=None, brics=True, start_frame=0, end_frame=20000, num_frames=20000):
+             , wandb_run=None, brics=True, frame_idx=0):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians, brics=brics, start_frame=start_frame, end_frame=end_frame, num_frames=num_frames)
+    scene = Scene(dataset, gaussians, brics=brics, frame_idx=frame_idx)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -459,9 +459,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--start_frame", type=int, default=0)
-    parser.add_argument("--end_frame", type=int, default=20000)
-    parser.add_argument("--num_frames", type=int, default=20000)
+    parser.add_argument("--frame_idx", type=int, default=0, help="Frame index to train on (single frame)")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -483,7 +481,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, 
-             wandb_run=run, start_frame=args.start_frame, end_frame=args.end_frame, num_frames=args.num_frames)
+             wandb_run=run, frame_idx=args.frame_idx)
 
     # All done
     print("\nTraining complete.")

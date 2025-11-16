@@ -15,8 +15,10 @@ class CAPUDFNetwork(nn.Module):
                  scale=1,
                  geometric_init=True,
                  weight_norm=True,
-                 inside_outside=False):
+                 inside_outside=False,
+                 flip_sdf_sign=False):
         super(CAPUDFNetwork, self).__init__()
+        self.flip_sdf_sign = flip_sdf_sign
 
         dims = [d_in] + [d_hidden for _ in range(n_layers)] + [d_out]
 
@@ -91,7 +93,10 @@ class CAPUDFNetwork(nn.Module):
         return res / self.scale
 
     def sdf(self, x):
-        return self.forward(x)
+        result = self.forward(x)
+        if self.flip_sdf_sign:
+            result = -result
+        return result
 
     def udf_hidden_appearance(self, x):
         return self.forward(x)

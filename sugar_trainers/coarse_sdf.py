@@ -142,6 +142,11 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
         regularize_sdf_only_for_gaussians_with_high_opacity = False
         if regularize_sdf_only_for_gaussians_with_high_opacity:
             sdf_regularization_opacity_threshold = 0.5
+        
+        # Flip SDF sign if inside/outside convention is reversed
+        # Set to True if your SDF has inside/outside flipped (inside becomes outside and vice versa)
+        # When True: flips SDF values AND reverses pulling direction to correct for the flip
+        flip_sdf_sign = True  # Set to True to flip SDF sign, False to use original
             
         use_sdf_estimation_loss = True
         enforce_samples_to_be_on_surface = False
@@ -481,7 +486,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
     sugar.reset_neighbors()
 
     if start_iteration == 9000:
-        sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=9000, scene_name=scene_name)
+        sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points, iteration=9000, scene_name=scene_name)
 
 
     # ====================Start training====================
@@ -557,7 +562,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                 gaussian_densifier.prune_points(prune_mask)
                 print('After Prunning: {} Gaussians Left.'.format(sugar.points.shape[0]))
                 sugar.visual_point_cloud(iteration=opacity_prune_iteration, checkpoint_path=sugar_checkpoint_path)
-                sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=opacity_prune_iteration-1, scene_name=scene_name)
+                sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points, iteration=opacity_prune_iteration-1, scene_name=scene_name)
                 has_not_pruned = False
 
             # Resample threshold - starts 500 iterations after SDF training begins
@@ -565,7 +570,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
             if iteration % 1000 == 0 and iteration != last_resample_iteration and iteration > resample_start_iteration:
                 if iteration % 2000 == 0:
                     print('Recalculating Sample Points...')
-                    sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points.detach().cpu().numpy(), iteration=iteration, scene_name=scene_name)
+                    sugar.neus.reset_datasets(sugar_checkpoint_path, sugar.points, iteration=iteration, scene_name=scene_name)
                 last_resample_iteration = iteration
 
 
@@ -656,6 +661,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                     sdf_network = getattr(sugar.neus, 'sdf_network'+str(cur_part_num))
                     gradients_sample = sdf_network.gradient(samples).squeeze()  # 5000x3
                     udf_sample = sdf_network.sdf(samples)  # 5000x1
+                    # SDF sign flipping is now handled inside the network's sdf() method
                     
                     # Clamp SDF values to prevent extreme movements that cause noise
                     # At iteration 9000, SDF network is untrained, so clamp to reasonable range
@@ -671,7 +677,14 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                     udf_sample = torch.clamp(udf_sample, min=-udf_clamp_max, max=udf_clamp_max)
                     
                     grad_norm = F.normalize(gradients_sample, dim=1)  # 5000x3
-                    sample_moved = samples - grad_norm * udf_sample  # 5000x3
+                    # Pulling direction: move toward surface
+                    # If SDF is flipped at network level, gradient is also flipped, so we need to reverse direction
+                    # Check if network has flip_sdf_sign enabled
+                    network_flip = getattr(sdf_network, 'flip_sdf_sign', False)
+                    if network_flip:
+                        sample_moved = samples + grad_norm * udf_sample  # Reverse direction when flipped
+                    else:
+                        sample_moved = samples - grad_norm * udf_sample  # Standard: move opposite to gradient when outside
 
                     sdf_loss1 = sugar.neus.ChamferDisL1(points.unsqueeze(0), sample_moved.unsqueeze(0))
 
@@ -710,6 +723,7 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                         rescaled_sugar_points = (actual_gaussian_positions - dataset.shape_center) / dataset.shape_scale
                         _gradients_sample = sdf_network.gradient(rescaled_sugar_points).squeeze()
                         _udf_sample = sdf_network.sdf(rescaled_sugar_points)
+                        # SDF sign flipping is now handled inside the network's sdf() method
                         
                         # Squeeze to ensure 1D tensor for masking, but keep original for computation
                         _udf_sample_1d = _udf_sample.squeeze(-1) if _udf_sample.dim() > 1 else _udf_sample
@@ -734,12 +748,18 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                             _udf_sample = torch.clamp(_udf_sample, min=-_udf_clamp_max, max=_udf_clamp_max)
                             _grad_norm = F.normalize(_gradients_sample, dim=1)  #
                             # Move along gradient to surface: current_pos - normal * sdf_value
+                            # If SDF is flipped at network level, gradient is also flipped, so we need to reverse direction
                             # _udf_sample needs to be [N, 1] or [N] for broadcasting with _grad_norm [N, 3]
                             if _udf_sample.dim() == 1:
                                 _udf_sample_broadcast = _udf_sample.unsqueeze(-1)  # [N] -> [N, 1]
                             else:
                                 _udf_sample_broadcast = _udf_sample
-                            rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast
+                            # Check if network has flip_sdf_sign enabled
+                            network_flip = getattr(sdf_network, 'flip_sdf_sign', False)
+                            if network_flip:
+                                rescaled_sugar_points_moved = rescaled_sugar_points + _grad_norm * _udf_sample_broadcast  # Reverse direction when flipped
+                            else:
+                                rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast  # Standard direction
                             sugar_points_moved = rescaled_sugar_points_moved * dataset.shape_scale + dataset.shape_center
                             
                             # Only compute loss for Gaussians close to surface

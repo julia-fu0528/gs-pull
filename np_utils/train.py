@@ -38,8 +38,11 @@ class Runner:
         self.ChamferDisL1 = ChamferDistanceL1().cuda()
 
         # Networks
+        # Flip SDF sign if inside/outside convention is reversed
+        # Set to True if your SDF has inside/outside flipped
+        flip_sdf_sign = True  # Set to True to flip SDF sign, False to use original
         for i in range(1, part_num+1):
-            self.__setattr__('sdf_network'+str(i), CAPUDFNetwork().to(self.device))
+            self.__setattr__('sdf_network'+str(i), CAPUDFNetwork(flip_sdf_sign=flip_sdf_sign).to(self.device))
 
 
     def reset_datasets(self, path, pointcloud, iteration=9000, scene_name='Barn'):
