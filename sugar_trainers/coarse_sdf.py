@@ -678,13 +678,10 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                     
                     grad_norm = F.normalize(gradients_sample, dim=1)  # 5000x3
                     # Pulling direction: move toward surface
-                    # If SDF is flipped at network level, gradient is also flipped, so we need to reverse direction
-                    # Check if network has flip_sdf_sign enabled
-                    network_flip = getattr(sdf_network, 'flip_sdf_sign', False)
-                    if network_flip:
-                        sample_moved = samples + grad_norm * udf_sample  # Reverse direction when flipped
-                    else:
-                        sample_moved = samples - grad_norm * udf_sample  # Standard: move opposite to gradient when outside
+                    # When SDF is flipped at network level, both SDF and gradient are negated
+                    # The standard formula should work: samples - grad_norm * udf_sample
+                    # Because: samples - (-grad) * (-sdf) = samples - grad * sdf (negatives cancel)
+                    sample_moved = samples - grad_norm * udf_sample
 
                     sdf_loss1 = sugar.neus.ChamferDisL1(points.unsqueeze(0), sample_moved.unsqueeze(0))
 
@@ -748,18 +745,15 @@ def coarse_training_with_sdf_regularization(args, wandb_run=None):
                             _udf_sample = torch.clamp(_udf_sample, min=-_udf_clamp_max, max=_udf_clamp_max)
                             _grad_norm = F.normalize(_gradients_sample, dim=1)  #
                             # Move along gradient to surface: current_pos - normal * sdf_value
-                            # If SDF is flipped at network level, gradient is also flipped, so we need to reverse direction
+                            # When SDF is flipped at network level, both SDF and gradient are negated
+                            # The standard formula should work: rescaled_sugar_points - _grad_norm * _udf_sample
+                            # Because: points - (-grad) * (-sdf) = points - grad * sdf (negatives cancel)
                             # _udf_sample needs to be [N, 1] or [N] for broadcasting with _grad_norm [N, 3]
                             if _udf_sample.dim() == 1:
                                 _udf_sample_broadcast = _udf_sample.unsqueeze(-1)  # [N] -> [N, 1]
                             else:
                                 _udf_sample_broadcast = _udf_sample
-                            # Check if network has flip_sdf_sign enabled
-                            network_flip = getattr(sdf_network, 'flip_sdf_sign', False)
-                            if network_flip:
-                                rescaled_sugar_points_moved = rescaled_sugar_points + _grad_norm * _udf_sample_broadcast  # Reverse direction when flipped
-                            else:
-                                rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast  # Standard direction
+                            rescaled_sugar_points_moved = rescaled_sugar_points - _grad_norm * _udf_sample_broadcast
                             sugar_points_moved = rescaled_sugar_points_moved * dataset.shape_scale + dataset.shape_center
                             
                             # Only compute loss for Gaussians close to surface
