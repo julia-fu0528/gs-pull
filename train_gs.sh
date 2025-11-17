@@ -2,7 +2,7 @@ export PYTHONNOUSERSITE=1
 
 unset PYTHONPATH
 python gaussian_splatting/train.py \
-    -s /users/wfu16/data/users/wfu16/datasets/2025-11-15/episode_0000 \
-    -m /users/wfu16/data/users/wfu16/datasets/2025-11-15/episode_0000 \
-    --iterations 14000 --frame_idx 0 \
-    --test_iterations 1000 5000 7000 10000 14000  \
+    -s /users/wfu16/data/users/wfu16/datasets/2025-10-26/episode_0000 \
+    -m /users/wfu16/data/users/wfu16/datasets/2025-10-26/episode_0000 \
+    --iterations 30000 --frame_idx 0 \
+    --test_iterations 1000 5000 7000 10000 15000 19000 21000 25000 30000\

@@ -2334,8 +2334,46 @@ class SuGaR(nn.Module):
     def marching_cubes_part(self, iteration=0, checkpoint_path='.', resolution=256, vertex_color=False, thres=0., part=1, world_space=True, crop_border=True):
         dataset = getattr(self.neus, 'dataset' + str(part))
         sdf_network = getattr(self.neus, 'sdf_network' + str(part))
-        bound_min = torch.tensor(dataset.object_bbox_min, dtype=torch.float32)
-        bound_max = torch.tensor(dataset.object_bbox_max, dtype=torch.float32)
+        
+        # Compute actual bounding box from Gaussians in normalized space for this part
+        # Filter current Gaussians by spatial bounds (more robust than using stale part_select_idx)
+        # Convert all current points to normalized space
+        all_points_normalized = (self.points - dataset.shape_center) / dataset.shape_scale
+        
+        # Filter by the part's spatial bounds (block_min, block_max) in world space
+        # Convert block bounds to normalized space
+        block_min_normalized = (torch.tensor(dataset.block_min, device=self.device) - dataset.shape_center) / dataset.shape_scale
+        block_max_normalized = (torch.tensor(dataset.block_max, device=self.device) - dataset.shape_center) / dataset.shape_scale
+        
+        # Add some padding for the split_size
+        split_size_normalized = torch.tensor(dataset.split_size, device=self.device) / dataset.shape_scale
+        block_min_normalized = block_min_normalized - split_size_normalized / 20
+        block_max_normalized = block_max_normalized + split_size_normalized / 20
+        
+        # Filter points within this part's bounds
+        part_mask = torch.all(
+            (all_points_normalized >= block_min_normalized) & 
+            (all_points_normalized <= block_max_normalized), 
+            dim=1
+        )
+        
+        if part_mask.sum() > 0:
+            part_gaussians_normalized = all_points_normalized[part_mask]
+            # Compute bounding box with some padding
+            actual_min = part_gaussians_normalized.min(0)[0].cpu().numpy() - 0.1
+            actual_max = part_gaussians_normalized.max(0)[0].cpu().numpy() + 0.1
+            # Clamp to reasonable bounds to avoid extreme values
+            actual_min = np.clip(actual_min, -1.0, 1.0)
+            actual_max = np.clip(actual_max, -1.0, 1.0)
+            print(f'Part {part} actual normalized bbox: min={actual_min}, max={actual_max} (from {part_mask.sum()} Gaussians)')
+        else:
+            # Fallback to default if no Gaussians in this part
+            actual_min = dataset.object_bbox_min
+            actual_max = dataset.object_bbox_max
+            print(f'Part {part} using default bbox: min={actual_min}, max={actual_max} (no Gaussians found in part bounds)')
+        
+        bound_min = torch.tensor(actual_min, dtype=torch.float32)
+        bound_max = torch.tensor(actual_max, dtype=torch.float32)
         N = 64
         X = torch.linspace(bound_min[0], bound_max[0], resolution).split(N)
         Y = torch.linspace(bound_min[1], bound_max[1], resolution).split(N)
