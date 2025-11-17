@@ -3,7 +3,8 @@ import torch
 import numpy as np
 import random
 from sugar_utils.general_utils import str2bool
-from sugar_trainers.coarse_sdf import coarse_training_with_sdf_regularization
+from sugar_trainers.coarse_sdf import coarse_training_with_sdf_regularization as coarse_training_with_sdf_regularization
+from sugar_trainers.coarse_sdf_cloth import coarse_training_with_sdf_regularization as coarse_training_with_sdf_regularization_cloth
 try:
     import wandb
     WANDB_AVAILABLE = True
@@ -99,6 +100,8 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default='output/mipnerf360', help='output directory(do not include experiment name')    # TODO: change this
     parser.add_argument('--resolution', type=int, default=1, help='image resolution. (Courthouse 2 especially)')    # TODO: change this
     parser.add_argument('--remove_cams', type=str, default=None, help='Comma-separated list of camera indices to remove.')
+    parser.add_argument('--cloth', action='store_true', help="Use cloth dataset.")
+    parser.add_argument('--frame_idx', type=int, default=0, help="Frame index to train on (single frame).")
     # Parse arguments
     args = parser.parse_args()
     if args.remove_cams is not None:
@@ -139,6 +142,7 @@ if __name__ == "__main__":
         'white_bg': args.white_bg,
         'image_resolution': args.resolution,
         'remove_cams': remove_cams,
+        'frame_idx': args.frame_idx,
     })
     
     # Initialize wandb if available
@@ -151,7 +155,10 @@ if __name__ == "__main__":
         )
         print(f"W&B URL: {wandb_run.url}")
     
-    coarse_sugar_path = coarse_training_with_sdf_regularization(coarse_args, wandb_run=wandb_run)
+    if args.cloth:
+        coarse_sugar_path = coarse_training_with_sdf_regularization_cloth(coarse_args, wandb_run=wandb_run)
+    else:
+        coarse_sugar_path = coarse_training_with_sdf_regularization(coarse_args, wandb_run=wandb_run)
     
     if wandb_run is not None:
         wandb_run.finish()

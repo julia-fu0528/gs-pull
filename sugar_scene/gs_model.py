@@ -79,6 +79,7 @@ class GaussianSplattingWrapper:
                  eval_split_interval=8,
                  dataset_name=False,
                  image_resolution=1,
+                 frame_idx=0,
                  ) -> None:
         """Initialize the Gaussian Splatting model wrapper.
         
@@ -99,7 +100,7 @@ class GaussianSplattingWrapper:
         self.source_path = source_path
         self.output_path = output_path
         self.loaded_iteration = iteration_to_load
-        
+        self.frame_idx = frame_idx
         if model_params is None:
             model_params = ModelParams()
         if pipeline_params is None:
@@ -148,7 +149,7 @@ class GaussianSplattingWrapper:
                 output_path,
                 "point_cloud",
                 "iteration_" + str(iteration_to_load),
-                "point_cloud.ply"
+                f"{frame_idx:06d}.ply"
                 )
             )
 

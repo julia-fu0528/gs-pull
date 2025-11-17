@@ -2437,6 +2437,150 @@ class SuGaR(nn.Module):
         print('Marching Cubes OK.')
         return mesh
 
+    def marching_cubes_thick_part(self, iteration=0, checkpoint_path='.', resolution=256, vertex_color=False, 
+                                   thickness=0.05, part=1, world_space=True, crop_border=True):
+        """
+        Extract a thick closed mesh by extracting two surfaces (inner and outer) and combining them.
+        
+        Args:
+            thickness: Half-thickness of the mesh. Outer surface at SDF=+thickness, inner at SDF=-thickness
+        """
+        dataset = getattr(self.neus, 'dataset' + str(part))
+        sdf_network = getattr(self.neus, 'sdf_network' + str(part))
+        
+        # Compute actual bounding box from Gaussians in normalized space for this part
+        all_points_normalized = (self.points - dataset.shape_center) / dataset.shape_scale
+        
+        # Filter by the part's spatial bounds
+        block_min_normalized = (torch.tensor(dataset.block_min, device=self.device) - dataset.shape_center) / dataset.shape_scale
+        block_max_normalized = (torch.tensor(dataset.block_max, device=self.device) - dataset.shape_center) / dataset.shape_scale
+        
+        split_size_normalized = torch.tensor(dataset.split_size, device=self.device) / dataset.shape_scale
+        block_min_normalized = block_min_normalized - split_size_normalized / 20
+        block_max_normalized = block_max_normalized + split_size_normalized / 20
+        
+        part_mask = torch.all(
+            (all_points_normalized >= block_min_normalized) & 
+            (all_points_normalized <= block_max_normalized), 
+            dim=1
+        )
+        
+        if part_mask.sum() > 0:
+            part_gaussians_normalized = all_points_normalized[part_mask]
+            actual_min = part_gaussians_normalized.min(0)[0].cpu().numpy() - 0.1
+            actual_max = part_gaussians_normalized.max(0)[0].cpu().numpy() + 0.1
+            actual_min = np.clip(actual_min, -1.0, 1.0)
+            actual_max = np.clip(actual_max, -1.0, 1.0)
+            print(f'Part {part} actual normalized bbox: min={actual_min}, max={actual_max} (from {part_mask.sum()} Gaussians)')
+        else:
+            actual_min = dataset.object_bbox_min
+            actual_max = dataset.object_bbox_max
+            print(f'Part {part} using default bbox: min={actual_min}, max={actual_max} (no Gaussians found in part bounds)')
+        
+        bound_min = torch.tensor(actual_min, dtype=torch.float32)
+        bound_max = torch.tensor(actual_max, dtype=torch.float32)
+        N = 64
+        X = torch.linspace(bound_min[0], bound_max[0], resolution).split(N)
+        Y = torch.linspace(bound_min[1], bound_max[1], resolution).split(N)
+        Z = torch.linspace(bound_min[2], bound_max[2], resolution).split(N)
+        u = np.zeros([resolution, resolution, resolution], dtype=np.float32)
+        
+        # Sample SDF values
+        with torch.no_grad():
+            for xi, xs in enumerate(X):
+                for yi, ys in enumerate(Y):
+                    for zi, zs in enumerate(Z):
+                        xx, yy, zz = torch.meshgrid(xs, ys, zs)
+                        pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)],
+                                        dim=-1).cuda()
+                        sample_sdf = sdf_network.sdf(pts)
+                        val = sample_sdf.reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
+                        u[xi * N: xi * N + len(xs), yi * N: yi * N + len(ys), zi * N: zi * N + len(zs)] = val
+        
+        b_max_np = bound_max.cpu().numpy()
+        b_min_np = bound_min.cpu().numpy()
+        
+        # Extract outer surface (SDF = +thickness)
+        vertices_outer, triangles_outer = mcubes.marching_cubes(u, thickness)
+        vertices_outer = vertices_outer / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+        
+        # Extract inner surface (SDF = -thickness)
+        vertices_inner, triangles_inner = mcubes.marching_cubes(u, -thickness)
+        vertices_inner = vertices_inner / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+        
+        # Convert to world space if needed
+        if world_space:
+            vertices_outer = vertices_outer * dataset.shape_scale.cpu().numpy() + dataset.shape_center.cpu().numpy()
+            vertices_inner = vertices_inner * dataset.shape_scale.cpu().numpy() + dataset.shape_center.cpu().numpy()
+            
+            if crop_border:
+                # Crop outer surface
+                vertex_mask_outer = np.all((vertices_outer >= dataset.block_min - dataset.split_size/40) &
+                                          (vertices_outer <= dataset.block_max + dataset.split_size/40), axis=1)
+                faces_mask_outer = np.all(vertex_mask_outer[triangles_outer], axis=1)
+                new_faces_outer = triangles_outer[faces_mask_outer]
+                new_indices_outer = np.zeros(len(vertex_mask_outer), dtype=int)
+                new_indices_outer[vertex_mask_outer] = np.arange(np.sum(vertex_mask_outer))
+                triangles_outer = new_indices_outer[new_faces_outer]
+                vertices_outer = vertices_outer[vertex_mask_outer]
+                
+                # Crop inner surface
+                vertex_mask_inner = np.all((vertices_inner >= dataset.block_min - dataset.split_size/40) &
+                                          (vertices_inner <= dataset.block_max + dataset.split_size/40), axis=1)
+                faces_mask_inner = np.all(vertex_mask_inner[triangles_inner], axis=1)
+                new_faces_inner = triangles_inner[faces_mask_inner]
+                new_indices_inner = np.zeros(len(vertex_mask_inner), dtype=int)
+                new_indices_inner[vertex_mask_inner] = np.arange(np.sum(vertex_mask_inner))
+                triangles_inner = new_indices_inner[new_faces_inner]
+                vertices_inner = vertices_inner[vertex_mask_inner]
+        
+        # Combine both surfaces into a single mesh
+        # Offset inner surface triangles to account for outer surface vertices
+        num_outer_vertices = len(vertices_outer)
+        triangles_inner_offset = triangles_inner + num_outer_vertices
+        
+        # Flip inner surface triangles so normals point outward (reverse winding order)
+        # This makes both surfaces face outward, creating a proper closed volume
+        triangles_inner_flipped = np.flip(triangles_inner_offset, axis=1)
+        
+        # Combine vertices and triangles
+        all_vertices = np.vstack([vertices_outer, vertices_inner])
+        all_triangles = np.vstack([triangles_outer, triangles_inner_flipped])
+        
+        # Get colors if needed
+        colors = None
+        if vertex_color:
+            colors_list = []
+            for pts in torch.tensor(all_vertices, dtype=torch.float).cuda().split(50000):
+                with torch.enable_grad():
+                    normals = sdf_network.gradient(pts).squeeze()
+                    normals = F.normalize(normals, p=2, dim=-1)
+                ndc_coords = torch.tensor([[0, 0, -1.0]]).cuda()
+                nerf_cameras = self.nerfmodel.training_cameras
+                p3d_camera = nerf_cameras.p3d_cameras[3]
+                world_coords = p3d_camera.unproject_points(ndc_coords, world_coordinates=True)
+                camera_center = p3d_camera.get_camera_center()
+                ray_directions = world_coords - camera_center
+                ray_directions = ray_directions / torch.norm(ray_directions, dim=-1, keepdim=True)
+                normals = normals * torch.sign((normals * ray_directions).sum(dim=-1, keepdim=True))
+                normals = torch.clamp((normals + 1) / 2, 0, 1.)
+                colors_list.append(normals.detach().cpu().numpy() * 255)
+            colors = np.concatenate(colors_list, 0)
+        
+        debug_path = os.path.join(checkpoint_path, 'meshes')
+        os.makedirs(debug_path, exist_ok=True)
+        mesh = trimesh.Trimesh(all_vertices, all_triangles, vertex_colors=colors)
+        
+        # Try to make the mesh watertight by filling holes
+        try:
+            mesh.fill_holes()
+        except:
+            pass
+        
+        mesh.export(os.path.join(debug_path, 'mcubes_thick_{}_{}.ply'.format(iteration, part)))
+        print(f'Marching Cubes Thick OK (thickness={thickness}).')
+        return mesh
+
     def visual_point_cloud(self, iteration=0, checkpoint_path='.'):
         xyz = self.points.detach().cpu().numpy()
         # Extract colors from SH coefficients (DC component)

@@ -217,11 +217,121 @@ def marching_cubes_sdf_part(neus, iteration=0, checkpoint_path='.', resolution=2
         moved_pts = torch.cat(moved_pts, 0)
         moved_pts = moved_pts * dataset.shape_scale + dataset.shape_center
         moved_mesh = trimesh.Trimesh(moved_pts.cpu().numpy(), triangles)
-        moved_mesh.export(os.path.join(sugar_checkpoint_path, 'meshes', 'mcubes_moved_{}_{}.ply'.format(iteration, part)))
+        moved_mesh.export(os.path.join(checkpoint_path, 'meshes', 'mcubes_moved_{}_{}.ply'.format(iteration, part)))
 
         mesh = moved_mesh
 
     print('Marching Cubes OK.')
+    return mesh
+
+def marching_cubes_sdf_thick_part(neus, iteration=0, checkpoint_path='.', resolution=256, vertex_color=False, 
+                                   thickness=0.05, part=1, world_space=True, crop_border=True):
+    """
+    Extract a thick closed mesh by extracting two surfaces (inner and outer) and combining them.
+    
+    Args:
+        thickness: Half-thickness of the mesh. Outer surface at SDF=+thickness, inner at SDF=-thickness
+    """
+    dataset = getattr(neus, 'dataset' + str(part))
+    sdf_network = getattr(neus, 'sdf_network' + str(part))
+    dataset.object_bbox_min = np.array([-0.6,-0.6,-0.6])
+    dataset.object_bbox_max = np.array([0.6,0.6,0.6])
+    bound_min = torch.tensor(dataset.object_bbox_min, dtype=torch.float32)
+    bound_max = torch.tensor(dataset.object_bbox_max, dtype=torch.float32)
+    N = 64
+    X = torch.linspace(bound_min[0], bound_max[0], resolution).split(N)
+    Y = torch.linspace(bound_min[1], bound_max[1], resolution).split(N)
+    Z = torch.linspace(bound_min[2], bound_max[2], resolution).split(N)
+    u = np.zeros([resolution, resolution, resolution], dtype=np.float32)
+    
+    # Sample SDF values
+    with torch.no_grad():
+        for xi, xs in enumerate(X):
+            for yi, ys in enumerate(Y):
+                for zi, zs in enumerate(Z):
+                    xx, yy, zz = torch.meshgrid(xs, ys, zs)
+                    pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)],
+                                    dim=-1).cuda()
+                    sample_sdf = sdf_network.sdf(pts)
+                    val = sample_sdf.reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
+                    u[xi * N: xi * N + len(xs), yi * N: yi * N + len(ys), zi * N: zi * N + len(zs)] = val
+    
+    b_max_np = bound_max.cpu().numpy()
+    b_min_np = bound_min.cpu().numpy()
+    
+    # Extract outer surface (SDF = +thickness)
+    vertices_outer, triangles_outer = mcubes.marching_cubes(u, thickness)
+    vertices_outer = vertices_outer / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+    
+    # Extract inner surface (SDF = -thickness)
+    vertices_inner, triangles_inner = mcubes.marching_cubes(u, -thickness)
+    vertices_inner = vertices_inner / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
+    
+    # Convert to world space if needed
+    if world_space:
+        vertices_outer = vertices_outer * dataset.shape_scale.cpu().numpy() + dataset.shape_center.cpu().numpy()
+        vertices_inner = vertices_inner * dataset.shape_scale.cpu().numpy() + dataset.shape_center.cpu().numpy()
+        
+        if crop_border:
+            # Crop outer surface
+            vertex_mask_outer = np.all((vertices_outer >= dataset.block_min - dataset.split_size/40) &
+                                      (vertices_outer <= dataset.block_max + dataset.split_size/40), axis=1)
+            faces_mask_outer = np.all(vertex_mask_outer[triangles_outer], axis=1)
+            new_faces_outer = triangles_outer[faces_mask_outer]
+            new_indices_outer = np.zeros(len(vertex_mask_outer), dtype=int)
+            new_indices_outer[vertex_mask_outer] = np.arange(np.sum(vertex_mask_outer))
+            triangles_outer = new_indices_outer[new_faces_outer]
+            vertices_outer = vertices_outer[vertex_mask_outer]
+            
+            # Crop inner surface
+            vertex_mask_inner = np.all((vertices_inner >= dataset.block_min - dataset.split_size/40) &
+                                      (vertices_inner <= dataset.block_max + dataset.split_size/40), axis=1)
+            faces_mask_inner = np.all(vertex_mask_inner[triangles_inner], axis=1)
+            new_faces_inner = triangles_inner[faces_mask_inner]
+            new_indices_inner = np.zeros(len(vertex_mask_inner), dtype=int)
+            new_indices_inner[vertex_mask_inner] = np.arange(np.sum(vertex_mask_inner))
+            triangles_inner = new_indices_inner[new_faces_inner]
+            vertices_inner = vertices_inner[vertex_mask_inner]
+    
+    # Combine both surfaces into a single mesh
+    # Offset inner surface triangles to account for outer surface vertices
+    num_outer_vertices = len(vertices_outer)
+    triangles_inner_offset = triangles_inner + num_outer_vertices
+    
+    # Flip inner surface triangles so normals point outward (reverse winding order)
+    # This makes both surfaces face outward, creating a proper closed volume
+    triangles_inner_flipped = np.flip(triangles_inner_offset, axis=1)
+    
+    # Combine vertices and triangles
+    all_vertices = np.vstack([vertices_outer, vertices_inner])
+    all_triangles = np.vstack([triangles_outer, triangles_inner_flipped])
+    
+    # Get colors if needed
+    colors = None
+    if vertex_color:
+        colors_list = []
+        for pts in torch.tensor(all_vertices, dtype=torch.float).cuda().split(50000):
+            with torch.enable_grad():
+                normals = sdf_network.gradient(pts).squeeze()
+                normals = F.normalize(normals, p=2, dim=-1)
+            ndc_coords = torch.tensor([[0, 0, -1.0]]).cuda()
+            # Note: vertex_color requires nerfmodel, which we don't have here
+            # For now, skip color computation or use a default
+            colors_list.append(np.ones((len(pts), 3)) * 128)  # Default gray
+        colors = np.concatenate(colors_list, 0)
+    
+    debug_path = os.path.join(checkpoint_path, 'meshes')
+    os.makedirs(debug_path, exist_ok=True)
+    mesh = trimesh.Trimesh(all_vertices, all_triangles, vertex_colors=colors)
+    
+    # Try to make the mesh watertight by filling holes
+    try:
+        mesh.fill_holes()
+    except:
+        pass
+    
+    mesh.export(os.path.join(debug_path, 'mcubes_thick_{}_{}.ply'.format(iteration, part)))
+    print(f'Marching Cubes Thick OK (thickness={thickness}).')
     return mesh
 
 if __name__ == '__main__':
@@ -237,6 +347,8 @@ if __name__ == '__main__':
                         default='output/DTU/scan24',       # TODO: change here. DO NOT ADD '/' at end
                         help='output directory(do not include experiment name)')
     parser.add_argument('-d', '--dataset_name', default="real360", help='blender, real360, relight3d')
+    parser.add_argument('--cloth', action='store_true', help='Use cloth mode: extract thick closed mesh (pancake-like with thickness)')
+    parser.add_argument('--thickness', type=float, default=0.001, help='Half-thickness for thick mesh extraction (default: 0.001)')
     args = parser.parse_args()
 
     output_dir = args.output_path
@@ -263,8 +375,19 @@ if __name__ == '__main__':
         if type == 'udf':
             evaluated_mesh = marching_cubes_udf_part(neus, start_iteration, sugar_checkpoint_path, resolution=resolution, vertex_color=False, part=part, thres=1.0)
         elif type == 'sdf':
-            evaluated_mesh = marching_cubes_sdf_part(
-                neus, start_iteration, sugar_checkpoint_path, resolution=resolution, vertex_color=False, part=part, thres=0.002, move_surf=move_surf)
+            if args.cloth:
+                # Extract thick closed mesh (pancake-like with thickness) for cloth
+                evaluated_mesh = marching_cubes_sdf_thick_part(
+                    neus, start_iteration, sugar_checkpoint_path, 
+                    resolution=resolution, 
+                    vertex_color=False, 
+                    thickness=args.thickness, 
+                    part=part
+                )
+            else:
+                # Extract single surface
+                evaluated_mesh = marching_cubes_sdf_part(
+                    neus, start_iteration, sugar_checkpoint_path, resolution=resolution, vertex_color=False, part=part, thres=0.002, move_surf=move_surf)
         vertices, triangles = evaluated_mesh.vertices, evaluated_mesh.faces
         vertices_list.append(vertices)
         triangles_list.append(triangles)
@@ -275,7 +398,8 @@ if __name__ == '__main__':
         for i, tri in enumerate(triangles_list)
     ])
     combined_mesh = trimesh.Trimesh(vertices=all_vertices, faces=all_triangles)
-    combined_mesh.export(os.path.join(sugar_checkpoint_path, 'meshes', 'mesh'+type+'_merge_{}.ply'.format(start_iteration)))
+    mesh_suffix = 'thick' if (type == 'sdf' and args.cloth) else type
+    combined_mesh.export(os.path.join(sugar_checkpoint_path, 'meshes', 'mesh'+mesh_suffix+'_merge_{}.ply'.format(start_iteration)))
     torch.cuda.empty_cache()
 
     # TODO: clean faces according to view visibility
