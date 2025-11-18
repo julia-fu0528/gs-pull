@@ -330,6 +330,10 @@ def marching_cubes_sdf_thick_part(neus, iteration=0, checkpoint_path='.', resolu
     except:
         pass
     
+    print("verts_outer:", len(vertices_outer))
+    print("faces_outer:", len(triangles_outer))
+    print("verts_inner:", len(vertices_inner))
+    print("faces_inner:", len(triangles_inner))
     mesh.export(os.path.join(debug_path, 'mcubes_thick_{}_{}.ply'.format(iteration, part)))
     print(f'Marching Cubes Thick OK (thickness={thickness}).')
     return mesh
